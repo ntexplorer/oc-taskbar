@@ -22,26 +22,306 @@ const RETAIN_MS = 60_000
 // families on this cadence so the footer fallback still sees fresh subagents.
 const FALLBACK_POLL_MS = 30_000
 
-type PtyInfo = { id: string; title?: string }
-
-type TaskKind = "shell" | "agent" | "terminal"
-
-type TaskItem = {
-  readonly kind: TaskKind
-  readonly id: string
-  readonly label: string
-  readonly detail?: string
-}
-
-type CompletedItem = TaskItem & { readonly at: number }
-
-const kindIcon: Record<TaskKind, string> = {
-  shell: "$",
-  agent: "@",
-  terminal: ">",
-}
-
 const short = (id: string) => id.slice(-6)
+
+// ---------------------------------------------------------------------------
+// Localization. The display language follows the root session's title — the
+// host generates it from the user's first message, so it tracks the language
+// the user writes in. OC_TASKBAR_LANG=zh|en forces a pack and skips
+// detection. Adding a language = adding one entry to PACKS.
+// ---------------------------------------------------------------------------
+
+type Lang = "zh" | "en"
+
+const ENV_LANG: Lang | undefined =
+  process.env.OC_TASKBAR_LANG === "zh" || process.env.OC_TASKBAR_LANG === "en" ? process.env.OC_TASKBAR_LANG : undefined
+
+const HAN = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/g
+const KANA_HANGUL = /[\u3040-\u30ff\uac00-\ud7af]/g
+
+function detectLang(text: string): Lang {
+  const han = text.match(HAN)?.length ?? 0
+  if (han === 0) return "en"
+  // Kana/Hangul means Japanese/Korean — no packs for those yet, so fall back
+  // to English rather than showing Chinese strings.
+  if ((text.match(KANA_HANGUL)?.length ?? 0) > 0) return "en"
+  const letters = text.match(/[A-Za-z]/g)?.length ?? 0
+  return letters === 0 || han * 10 >= letters ? "zh" : "en"
+}
+
+type ShellKey = "test" | "build" | "install" | "commit" | "sync" | "search" | "copy" | "move" | "http"
+
+type Pack = {
+  readonly header: string
+  readonly idle: string
+  readonly doneSuffix: string
+  readonly terminal: string
+  readonly agent: string
+  readonly notifyDone: (label: string) => string
+  readonly shell: {
+    readonly label: Record<ShellKey, string>
+    readonly run: (cmd: string) => string
+    readonly copyOne: (name: string) => string
+    readonly moveOne: (name: string) => string
+  }
+  readonly footer: {
+    readonly tasks: (running: number, done: number) => string
+    readonly doneOnly: (done: number) => string
+  }
+}
+
+const PACKS: Record<Lang, Pack> = {
+  zh: {
+    header: "📋 后台任务",
+    idle: "😴 暂无任务",
+    doneSuffix: " · 完成了",
+    terminal: "终端",
+    agent: "子代理",
+    notifyDone: (label) => `✅ ${label} 完成了`,
+    shell: {
+      label: {
+        test: "运行测试",
+        build: "构建项目",
+        install: "安装依赖",
+        commit: "提交代码",
+        sync: "同步仓库",
+        search: "检索文件",
+        copy: "复制文件",
+        move: "移动文件",
+        http: "网络请求",
+      },
+      run: (cmd) => `运行 ${cmd}`,
+      copyOne: (name) => `复制 · ${name}`,
+      moveOne: (name) => `移动 · ${name}`,
+    },
+    footer: {
+      tasks: (n, m) => (m > 0 ? `🏃 ${n} 个任务（${m} 个完成）` : `🏃 ${n} 个任务`),
+      doneOnly: (n) => `✅ ${n} 个刚完成`,
+    },
+  },
+  en: {
+    header: "📋 Background",
+    idle: "😴 all clear",
+    doneSuffix: " · done",
+    terminal: "terminal",
+    agent: "subagent",
+    notifyDone: (label) => `✅ ${label} finished`,
+    shell: {
+      label: {
+        test: "Run tests",
+        build: "Build project",
+        install: "Install deps",
+        commit: "Commit changes",
+        sync: "Sync repo",
+        search: "Search files",
+        copy: "Copy files",
+        move: "Move files",
+        http: "HTTP request",
+      },
+      run: (cmd) => `Run ${cmd}`,
+      copyOne: (name) => `Copy · ${name}`,
+      moveOne: (name) => `Move · ${name}`,
+    },
+    footer: {
+      tasks: (n, m) => {
+        const unit = n === 1 ? "task" : "tasks"
+        return m > 0 ? `🏃 ${n} ${unit} (${m} done)` : `🏃 ${n} ${unit}`
+      },
+      doneOnly: (n) => `✅ ${n} just finished`,
+    },
+  },
+}
+
+// ---------------------------------------------------------------------------
+// Friendly task descriptions (heuristic — no LLM calls from a task bar).
+// Raw commands / titles always survive in item.detail for click-to-expand.
+// ---------------------------------------------------------------------------
+
+const SHELL_ICON: Record<ShellKey, string> = {
+  test: "🧪",
+  build: "🔨",
+  install: "📦",
+  commit: "💾",
+  sync: "🔄",
+  search: "🔍",
+  copy: "📂",
+  move: "📂",
+  http: "🌐",
+}
+
+// Strip the common "powershell -Command …" / "cmd /c …" / "sh -c …" wrappers
+// so the classifier sees the inner command.
+function unwrapCommand(raw: string): string {
+  let s = raw.trim()
+  for (let round = 0; round < 3; round++) {
+    const m =
+      s.match(/^(?:powershell|pwsh)(?:\.exe)?\s+(?:-{1,2}[A-Za-z]+\s+)*-(?:c|command)\s+([\s\S]+)$/i) ??
+      s.match(/^cmd(?:\.exe)?\s+\/c\s+([\s\S]+)$/i) ??
+      s.match(/^(?:sh|bash|zsh)(?:\.exe)?\s+(?:-{1,2}[A-Za-z]+\s+)*-c\s+([\s\S]+)$/i)
+    if (!m) break
+    let inner = m[1].trim()
+    if (inner.length >= 2) {
+      const q = inner[0]
+      if ((q === '"' || q === "'") && inner.endsWith(q)) inner = inner.slice(1, -1)
+    }
+    s = inner.trim()
+  }
+  return s
+}
+
+// Positional args: skip leading flags, stop at the first flag after them
+// (robocopy's "/XD .git" tail must not leak into the path garnish).
+function positional(args: string[]): string[] {
+  let i = 0
+  while (i < args.length && /^[-/]/.test(args[i])) i++
+  const out: string[] = []
+  for (; i < args.length; i++) {
+    if (/^[-/]/.test(args[i])) break
+    out.push(args[i])
+  }
+  return out
+}
+
+const NPM_LIKE = new Set(["npm", "pnpm", "yarn", "bun", "deno", "npx", "bunx"])
+
+function classifyShell(exe: string, args: string[]): ShellKey | undefined {
+  const pos = positional(args)
+  const first = pos[0] ?? ""
+  if (exe === "git") {
+    if (pos.includes("commit")) return "commit"
+    if (first === "push" || first === "pull" || first === "fetch") return "sync"
+    return undefined
+  }
+  if (NPM_LIKE.has(exe)) {
+    const sub = first === "run" || first === "exec" ? pos[1] : first
+    if (sub?.startsWith("test")) return "test"
+    if (sub?.startsWith("build")) return "build"
+    if (sub === "install" || sub === "i" || sub === "add") return "install"
+    return undefined
+  }
+  switch (exe) {
+    case "vitest":
+    case "jest":
+    case "mocha":
+    case "pytest":
+    case "py.test":
+      return "test"
+    case "go":
+    case "cargo":
+      if (first === "test") return "test"
+      if (first === "build") return "build"
+      if (exe === "cargo" && first === "add") return "install"
+      return undefined
+    case "tsc":
+    case "make":
+    case "cmake":
+    case "msbuild":
+    case "webpack":
+    case "vite":
+      return "build"
+    case "pip":
+    case "pip3":
+    case "uv":
+      return first === "install" ? "install" : undefined
+    case "rg":
+    case "grep":
+    case "findstr":
+    case "find":
+    case "fd":
+    case "ls":
+    case "dir":
+    case "gci":
+    case "Get-ChildItem":
+    case "where":
+    case "which":
+      return "search"
+    case "robocopy":
+    case "xcopy":
+    case "cp":
+    case "copy":
+    case "Copy-Item":
+    case "scp":
+    case "rsync":
+      return "copy"
+    case "mv":
+    case "move":
+    case "Move-Item":
+      return "move"
+    case "curl":
+    case "wget":
+    case "Invoke-WebRequest":
+    case "Invoke-RestMethod":
+    case "iwr":
+      return "http"
+    default:
+      return undefined
+  }
+}
+
+// Short basename of the last positional arg (the destination), for garnish.
+function garnishPath(args: string[]): string | undefined {
+  const pos = positional(args)
+  const last = pos[pos.length - 1]
+  if (!last) return undefined
+  const name = last.split(/[\\/]/).filter(Boolean).pop()
+  if (!name || name.length > 24) return undefined
+  return name
+}
+
+function describeShell(
+  command: string | undefined,
+  fallbackName: string,
+  pack: Pack,
+): { icon: string; label: string } {
+  const raw = command?.trim()
+  if (!raw) return { icon: "💻", label: pack.shell.run(fallbackName) }
+  const body = unwrapCommand(raw)
+  const segment = (body.split(/&&|\|\||;|\n/)[0] ?? body).trim()
+  const tokens = segment.split(/\s+/).filter(Boolean)
+  if (tokens.length === 0) return { icon: "💻", label: pack.shell.run(fallbackName) }
+  const exe = (tokens[0].split(/[\\/]/).pop() ?? tokens[0])
+    .replace(/\.(exe|cmd|bat)$/i, "")
+    .replace(/^"|"$/g, "")
+  const args = tokens.slice(1).map((t) => t.replace(/^"|"$/g, ""))
+  const key = classifyShell(exe, args)
+  if (key === "copy" || key === "move") {
+    const name = garnishPath(args)
+    if (name) return { icon: SHELL_ICON[key], label: key === "copy" ? pack.shell.copyOne(name) : pack.shell.moveOne(name) }
+  }
+  if (key) return { icon: SHELL_ICON[key], label: pack.shell.label[key] }
+  return { icon: "💻", label: pack.shell.run(exe || fallbackName) }
+}
+
+// Sub-agent titles are already natural language (written by the parent model
+// in the user's language); just pick a matching icon and trim noise.
+const AGENT_ICON_RULES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/(探索|检索|查找|搜索|调研|explor|investigat|research|scan)/i, "🔍"],
+  [/(修复|改正|fix|patch|debug|bug)/i, "🔧"],
+  [/(实现|编写|开发|添加|创建|重构|implement|write|creat|develop|refactor|build)/i, "✍️"],
+  [/(审查|复查|检查|review|audit|inspect)/i, "🧐"],
+  [/(测试|验证|test|verif)/i, "🧪"],
+  [/(文档|注释|readme|document|comment)/i, "📝"],
+]
+
+function cleanTitle(title: string): string {
+  return title
+    .trim()
+    .replace(/^[\s"'「『【（(-]+/, "")
+    .replace(/[\s"'」』】）)-]+$/, "")
+    .trim()
+}
+
+function describeAgent(
+  title: string | undefined,
+  fallbackName: string,
+): { icon: string; label: string; detail?: string } {
+  const cleaned = cleanTitle(title ?? "")
+  if (!cleaned) return { icon: "🤖", label: fallbackName }
+  for (const [pattern, icon] of AGENT_ICON_RULES) {
+    if (pattern.test(cleaned)) return { icon, label: cleaned, detail: title }
+  }
+  return { icon: "🤖", label: cleaned, detail: title }
+}
 
 // ---------------------------------------------------------------------------
 // Module-level singleton store.
@@ -58,6 +338,20 @@ const short = (id: string) => id.slice(-6)
 // builds a second store; the old root is never disposed, so until the TUI is
 // restarted you may see duplicated probe lines / notification sounds.
 // ---------------------------------------------------------------------------
+
+type PtyInfo = { id: string; title?: string }
+
+type TaskKind = "shell" | "agent" | "terminal"
+
+type TaskItem = {
+  readonly kind: TaskKind
+  readonly id: string
+  readonly icon: string
+  readonly label: string
+  readonly detail?: string
+}
+
+type CompletedItem = TaskItem & { readonly at: number }
 
 type ShellList = NonNullable<ReturnType<Plugin.Context["data"]["shell"]["list"]>>
 type SessionList = NonNullable<ReturnType<Plugin.Context["data"]["session"]["list"]>>
@@ -80,12 +374,33 @@ function createTaskStore(context: Plugin.Context) {
   void data.shell.sync().catch(() => undefined)
 
   // The sidebar passes its sessionID whenever a Taskbar mounts; terminal
-  // listing and sub-session hydration key off this signal. The footer badge
-  // never overrides it (no id of its own), so it mirrors the active sidebar.
+  // listing, sub-session hydration, and language detection key off this
+  // signal. The footer badge never overrides it (no id of its own), so it
+  // mirrors the active sidebar.
   const [activeSession, setActiveSession] = createSignal<string | undefined>(undefined)
   const track = (id: string | undefined) => {
     if (id) setActiveSession(id)
   }
+
+  // ---- display language: follows the root session title (generated from
+  // the user's first message). Sticky on read failure — same principle as
+  // every other read below. ENV_LANG pins it. ----
+  let lastLang: Lang = ENV_LANG ?? "en"
+  const lang = createMemo<Lang>(() => {
+    if (ENV_LANG) return ENV_LANG
+    const id = activeSession()
+    if (!id) return lastLang
+    try {
+      const session = data.session.get(id)
+      const root = session?.parentID ?? id
+      const title = data.session.get(root)?.title
+      if (title) lastLang = detectLang(title)
+    } catch {
+      /* keep last good language */
+    }
+    return lastLang
+  })
+  const pack = createMemo(() => PACKS[lang()])
 
   // ---- sub-agent families are lazy too: sync each family root once.
   // A failed sync un-marks the root so a later tab switch retries it. ----
@@ -191,6 +506,22 @@ function createTaskStore(context: Plugin.Context) {
     }
   })
 
+  // ---- friendly item builders (icon + localized label, raw text in detail) ----
+  const shellItem = (shell: ShellList[number], p: Pack): TaskItem => {
+    const desc = describeShell(shell.command, `shell ${short(shell.id)}`, p)
+    return { kind: "shell", id: shell.id, icon: desc.icon, label: desc.label, detail: shell.command }
+  }
+  const agentItem = (session: SessionList[number], p: Pack): TaskItem => {
+    const desc = describeAgent(session.title, `${p.agent} ${short(session.id)}`)
+    return { kind: "agent", id: session.id, icon: desc.icon, label: desc.label, detail: desc.detail }
+  }
+  const terminalItem = (pty: PtyInfo, p: Pack): TaskItem => ({
+    kind: "terminal",
+    id: pty.id,
+    icon: "🖥️",
+    label: pty.title?.trim() || p.terminal,
+  })
+
   // ---- completed trail: remember labels before they vanish from the reactive lists ----
   const [completed, setCompleted] = createSignal<CompletedItem[]>([])
   const labelCache = new Map<string, TaskItem>()
@@ -203,21 +534,18 @@ function createTaskStore(context: Plugin.Context) {
   }
 
   // Track disappearing shells (exited or deleted both remove from the store).
+  // Reading pack() inside the handler also tracks the language signal, so a
+  // language switch refreshes cached labels with no spurious completions
+  // (the alive-diff finds nothing missing when only the language changed).
   createEffect(
     on(shells, (list, previous) => {
       for (const shell of list) {
-        labelCache.set(shell.id, {
-          kind: "shell",
-          id: shell.id,
-          label: shell.command ?? `shell ${short(shell.id)}`,
-          detail: shell.command,
-        })
+        labelCache.set(shell.id, shellItem(shell, pack()))
       }
       if (previous) {
         const alive = new Set(list.map((shell) => shell.id))
         for (const shell of previous) {
-          if (!alive.has(shell.id))
-            remember(labelCache.get(shell.id) ?? { kind: "shell", id: shell.id, label: `shell ${short(shell.id)}` })
+          if (!alive.has(shell.id)) remember(shellItem(shell, pack()))
         }
       }
     }),
@@ -227,18 +555,12 @@ function createTaskStore(context: Plugin.Context) {
   createEffect(
     on(agents, (list, previous) => {
       for (const session of list) {
-        labelCache.set(session.id, {
-          kind: "agent",
-          id: session.id,
-          label: session.title ?? `agent ${short(session.id)}`,
-          detail: session.title,
-        })
+        labelCache.set(session.id, agentItem(session, pack()))
       }
       if (previous) {
         const alive = new Set(list.map((session) => session.id))
         for (const session of previous) {
-          if (!alive.has(session.id))
-            remember(labelCache.get(session.id) ?? { kind: "agent", id: session.id, label: `agent ${short(session.id)}` })
+          if (!alive.has(session.id)) remember(agentItem(session, pack()))
         }
       }
     }),
@@ -248,13 +570,12 @@ function createTaskStore(context: Plugin.Context) {
   createEffect(
     on(terminals, (list, previous) => {
       for (const pty of list) {
-        labelCache.set(pty.id, { kind: "terminal", id: pty.id, label: pty.title ?? `terminal ${short(pty.id)}` })
+        labelCache.set(pty.id, terminalItem(pty, pack()))
       }
       if (previous) {
         const alive = new Set(list.map((pty) => pty.id))
         for (const pty of previous) {
-          if (!alive.has(pty.id))
-            remember(labelCache.get(pty.id) ?? { kind: "terminal", id: pty.id, label: `terminal ${short(pty.id)}` })
+          if (!alive.has(pty.id)) remember(terminalItem(pty, pack()))
         }
       }
     }),
@@ -283,7 +604,7 @@ function createTaskStore(context: Plugin.Context) {
         }
         try {
           context.attention.notify({
-            message: `${entry.label} finished`,
+            message: pack().notifyDone(entry.label),
             sound: { name: entry.kind === "agent" ? "subagent_done" : "done" },
           })
           probe(`notify ok ${key}`)
@@ -299,36 +620,19 @@ function createTaskStore(context: Plugin.Context) {
   // across unrelated list updates.
   const stable = (item: TaskItem): TaskItem => {
     const cached = labelCache.get(item.id)
-    if (cached && cached.kind === item.kind && cached.label === item.label) return cached
+    if (cached && cached.kind === item.kind && cached.icon === item.icon && cached.label === item.label) return cached
     labelCache.set(item.id, item)
     return item
   }
 
-  const running = createMemo<TaskItem[]>(() => [
-    ...shells().map((shell) =>
-      stable({
-        kind: "shell",
-        id: shell.id,
-        label: shell.command ?? `shell ${short(shell.id)}`,
-        detail: shell.command,
-      }),
-    ),
-    ...agents().map((session) =>
-      stable({
-        kind: "agent",
-        id: session.id,
-        label: session.title ?? `agent ${short(session.id)}`,
-        detail: session.title,
-      }),
-    ),
-    ...terminals().map((pty) =>
-      stable({
-        kind: "terminal",
-        id: pty.id,
-        label: pty.title ?? `terminal ${short(pty.id)}`,
-      }),
-    ),
-  ])
+  const running = createMemo<TaskItem[]>(() => {
+    const p = pack()
+    return [
+      ...shells().map((shell) => stable(shellItem(shell, p))),
+      ...agents().map((session) => stable(agentItem(session, p))),
+      ...terminals().map((pty) => stable(terminalItem(pty, p))),
+    ]
+  })
 
   const stale = createMemo(() => completed().filter((entry) => Date.now() - entry.at <= RETAIN_MS))
   const total = createMemo(() => running().length)
@@ -339,23 +643,24 @@ function createTaskStore(context: Plugin.Context) {
       grandTotal,
       (value) =>
         probe(
-          `total=${value} running=${running().length} shells=${shells().length} agents=${agents().length} terminals=${terminals().length} done=${stale().length} session=${activeSession() ?? "-"}`,
+          `total=${value} running=${running().length} shells=${shells().length} agents=${agents().length} terminals=${terminals().length} done=${stale().length} session=${activeSession() ?? "-"} lang=${lang()}`,
         ),
       { defer: true },
     ),
   )
 
-  return { running, stale, total, grandTotal, track }
+  return { running, stale, total, grandTotal, track, lang, pack }
 }
 
-function TaskRow(props: { item: TaskItem; theme: Plugin.Context["theme"]; done?: boolean }) {
+function TaskRow(props: { item: TaskItem; theme: Plugin.Context["theme"]; pack: Pack; done?: boolean }) {
   const [expanded, setExpanded] = createSignal(false)
   const fg = props.done ? props.theme.text.muted : props.theme.text.base
   return (
     <box>
       <text fg={fg} onclick={() => setExpanded((value) => !value)}>
-        {props.done ? "✓" : kindIcon[props.item.kind]} {props.item.label.slice(0, expanded() ? 200 : 40)}
+        {props.done ? "✅" : props.item.icon} {props.item.label.slice(0, expanded() ? 200 : 40)}
         {props.item.label.length > 40 && !expanded() ? "…" : ""}
+        {props.done ? props.pack.doneSuffix : ""}
       </text>
       <Show when={expanded() && (props.item.detail ?? "").length > 40}>
         <text fg={props.theme.text.muted}>  {props.item.detail}</text>
@@ -373,13 +678,13 @@ export function Taskbar(props: { context: Plugin.Context; sessionID?: string }) 
   return (
     <box>
       <text fg={tasks.grandTotal() > 0 ? props.context.theme.text.base : props.context.theme.text.muted}>
-        <b>Tasks</b>
+        <b>{tasks.pack().header}</b>
         <Show when={tasks.grandTotal() === 0}>
-          <span style={{ fg: props.context.theme.text.muted }}> — none</span>
+          <span style={{ fg: props.context.theme.text.muted }}>{` ${tasks.pack().idle}`}</span>
         </Show>
       </text>
-      <For each={tasks.running()}>{(item) => <TaskRow item={item} theme={props.context.theme} />}</For>
-      <For each={tasks.stale()}>{(item) => <TaskRow item={item} theme={props.context.theme} done />}</For>
+      <For each={tasks.running()}>{(item) => <TaskRow item={item} theme={props.context.theme} pack={tasks.pack()} />}</For>
+      <For each={tasks.stale()}>{(item) => <TaskRow item={item} theme={props.context.theme} pack={tasks.pack()} done />}</For>
     </box>
   )
 }
@@ -389,10 +694,11 @@ export function FooterBadge(props: { context: Plugin.Context }) {
   probe("footer body")
   const tasks = getStore(props.context)
   const label = () => {
+    const p = tasks.pack()
     const runningCount = tasks.running().length
     const doneCount = tasks.stale().length
-    if (runningCount === 0) return `⚙ +${doneCount} done`
-    return `⚙ ${runningCount} task${runningCount === 1 ? "" : "s"}${doneCount > 0 ? ` (+${doneCount} done)` : ""}`
+    if (runningCount === 0) return p.footer.doneOnly(doneCount)
+    return p.footer.tasks(runningCount, doneCount)
   }
   return (
     <Show when={tasks.grandTotal() > 0}>
