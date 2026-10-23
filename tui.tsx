@@ -49,7 +49,7 @@ function detectLang(text: string): Lang {
   return letters === 0 || han * 10 >= letters ? "zh" : "en"
 }
 
-type ShellKey = "test" | "build" | "install" | "commit" | "sync" | "search" | "copy" | "move" | "http"
+type ShellKey = "test" | "build" | "install" | "commit" | "sync" | "search" | "inspect" | "copy" | "move" | "http"
 
 type Pack = {
   readonly header: string
@@ -86,6 +86,7 @@ const PACKS: Record<Lang, Pack> = {
         commit: "提交代码",
         sync: "同步仓库",
         search: "检索文件",
+        inspect: "查看变更",
         copy: "复制文件",
         move: "移动文件",
         http: "网络请求",
@@ -114,6 +115,7 @@ const PACKS: Record<Lang, Pack> = {
         commit: "Commit changes",
         sync: "Sync repo",
         search: "Search files",
+        inspect: "Inspect changes",
         copy: "Copy files",
         move: "Move files",
         http: "HTTP request",
@@ -144,6 +146,7 @@ const SHELL_ICON: Record<ShellKey, string> = {
   commit: "💾",
   sync: "🔄",
   search: "🔍",
+  inspect: "📖",
   copy: "📂",
   move: "📂",
   http: "🌐",
@@ -190,6 +193,7 @@ function classifyShell(exe: string, args: string[]): ShellKey | undefined {
   if (exe === "git") {
     if (pos.includes("commit")) return "commit"
     if (first === "push" || first === "pull" || first === "fetch") return "sync"
+    if (["status", "log", "diff", "show", "blame"].includes(first)) return "inspect"
     return undefined
   }
   if (NPM_LIKE.has(exe)) {
@@ -235,6 +239,11 @@ function classifyShell(exe: string, args: string[]): ShellKey | undefined {
     case "where":
     case "which":
       return "search"
+    case "cat":
+    case "type":
+    case "head":
+    case "tail":
+      return "inspect"
     case "robocopy":
     case "xcopy":
     case "cp":
@@ -276,20 +285,29 @@ function describeShell(
   const raw = command?.trim()
   if (!raw) return { icon: "💻", label: pack.shell.run(fallbackName) }
   const body = unwrapCommand(raw)
-  const segment = (body.split(/&&|\|\||;|\n/)[0] ?? body).trim()
-  const tokens = segment.split(/\s+/).filter(Boolean)
-  if (tokens.length === 0) return { icon: "💻", label: pack.shell.run(fallbackName) }
-  const exe = (tokens[0].split(/[\\/]/).pop() ?? tokens[0])
-    .replace(/\.(exe|cmd|bat)$/i, "")
-    .replace(/^"|"$/g, "")
-  const args = tokens.slice(1).map((t) => t.replace(/^"|"$/g, ""))
-  const key = classifyShell(exe, args)
-  if (key === "copy" || key === "move") {
-    const name = garnishPath(args)
-    if (name) return { icon: SHELL_ICON[key], label: key === "copy" ? pack.shell.copyOne(name) : pack.shell.moveOne(name) }
+  // Iterate segments ("cd … && <real command>") until one classifies — a bare
+  // "cd" must never become the label. First segment's exe feeds the fallback.
+  const segments = body
+    .split(/&&|\|\||;|\n/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  let firstExe: string | undefined
+  for (const segment of segments) {
+    const tokens = segment.split(/\s+/).filter(Boolean)
+    if (tokens.length === 0) continue
+    const exe = (tokens[0].split(/[\\/]/).pop() ?? tokens[0])
+      .replace(/\.(exe|cmd|bat)$/i, "")
+      .replace(/^"|"$/g, "")
+    const args = tokens.slice(1).map((t) => t.replace(/^"|"$/g, ""))
+    const key = classifyShell(exe, args)
+    if (key === "copy" || key === "move") {
+      const name = garnishPath(args)
+      if (name) return { icon: SHELL_ICON[key], label: key === "copy" ? pack.shell.copyOne(name) : pack.shell.moveOne(name) }
+    }
+    if (key) return { icon: SHELL_ICON[key], label: pack.shell.label[key] }
+    if (firstExe === undefined) firstExe = exe
   }
-  if (key) return { icon: SHELL_ICON[key], label: pack.shell.label[key] }
-  return { icon: "💻", label: pack.shell.run(exe || fallbackName) }
+  return { icon: "💻", label: pack.shell.run(firstExe || fallbackName) }
 }
 
 // Sub-agent titles are already natural language (written by the parent model
@@ -386,10 +404,13 @@ function createTaskStore(context: Plugin.Context) {
   // the user's first message). Sticky on read failure — same principle as
   // every other read below. ENV_LANG pins it. ----
   let lastLang: Lang = ENV_LANG ?? "en"
+  // Language backstop for footer-only mode (narrow terminal: no sidebar ever
+  // calls track()) — seeded from root-session titles by fallbackHydrate.
+  const [fallbackLang, setFallbackLang] = createSignal<Lang>(ENV_LANG ?? "en")
   const lang = createMemo<Lang>(() => {
     if (ENV_LANG) return ENV_LANG
     const id = activeSession()
-    if (!id) return lastLang
+    if (!id) return fallbackLang()
     try {
       const session = data.session.get(id)
       const root = session?.parentID ?? id
@@ -435,6 +456,20 @@ function createTaskStore(context: Plugin.Context) {
         if (session.parentID) roots.add(session.parentID)
       }
       for (const root of roots) hydrateRoot(root)
+      // Footer-only mode has no tracked session — seed the language from the
+      // majority of root-session titles so badges/notifications localize too.
+      if (!ENV_LANG && !activeSession()) {
+        const votes = new Map<Lang, number>()
+        for (const session of sessions) {
+          if (session.parentID || !session.title) continue
+          const detected = detectLang(session.title)
+          votes.set(detected, (votes.get(detected) ?? 0) + 1)
+        }
+        if (votes.size > 0) {
+          const [best] = [...votes.entries()].sort((a, b) => b[1] - a[1])
+          setFallbackLang(best[0])
+        }
+      }
     } catch {
       /* best effort — the poll retries */
     }
@@ -655,11 +690,14 @@ function createTaskStore(context: Plugin.Context) {
 function TaskRow(props: { item: TaskItem; theme: Plugin.Context["theme"]; pack: Pack; done?: boolean }) {
   const [expanded, setExpanded] = createSignal(false)
   const fg = props.done ? props.theme.text.muted : props.theme.text.base
+  // Truncate by code points: slicing UTF-16 units can cut a surrogate pair
+  // (agent titles may contain emoji) in half and render tofu.
+  const chars = () => Array.from(props.item.label)
   return (
     <box>
       <text fg={fg} onclick={() => setExpanded((value) => !value)}>
-        {props.done ? "✅" : props.item.icon} {props.item.label.slice(0, expanded() ? 200 : 40)}
-        {props.item.label.length > 40 && !expanded() ? "…" : ""}
+        {props.done ? "✅" : props.item.icon} {chars().slice(0, expanded() ? 200 : 40).join("")}
+        {chars().length > 40 && !expanded() ? "…" : ""}
         {props.done ? props.pack.doneSuffix : ""}
       </text>
       <Show when={expanded() && (props.item.detail ?? "").length > 40}>
@@ -690,9 +728,12 @@ export function Taskbar(props: { context: Plugin.Context; sessionID?: string }) 
 }
 
 /** One-line fallback for when the sidebar is collapsed; silent when idle. */
-export function FooterBadge(props: { context: Plugin.Context }) {
+export function FooterBadge(props: { context: Plugin.Context; sessionID?: string }) {
   probe("footer body")
   const tasks = getStore(props.context)
+  // The footer input carries the composer's sessionID — tracking it gives
+  // footer-only mode (no sidebar) the right language and terminal list.
+  createEffect(() => tasks.track(props.sessionID))
   const label = () => {
     const p = tasks.pack()
     const runningCount = tasks.running().length
@@ -720,7 +761,7 @@ export default Plugin.define({
     })
     context.ui.slot({
       prepend: "prompt.footer",
-      render: () => <FooterBadge context={context} />,
+      render: (props) => <FooterBadge context={context} sessionID={props.sessionID} />,
     })
   },
 })
