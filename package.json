@@ -4,5 +4,9 @@
   "description": "Persistent task monitor (subagent/shell/terminal) for the OpenCode V2 TUI sidebar",
   "type": "module",
   "private": true,
-  "license": "MIT"
+  "license": "MIT",
+  "main": "./tui.tsx",
+  "exports": {
+    ".": "./tui.tsx"
+  }
 }
