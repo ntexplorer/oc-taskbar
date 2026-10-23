@@ -1,6 +1,12 @@
 # 上游 API 研究笔记（2026-10-23，源码实测）
 
-来源：`anomalyco/opencode`（原 sst/opencode）`dev` 分支，v2.1.x。本文档是实现 `src/index.tsx` 的依据，防止上游重构后迷失。
+来源：`anomalyco/opencode`（原 sst/opencode）`dev` 分支，v2.1.x。本文档是实现 `tui.tsx` 的依据，防止上游重构后迷失。
+
+> **v1.0 补充（实测教训，详见 AGENTS.md 事实 10）**：
+> 1. **onMount 永不触发**——OpenTUI 的 Solid 运行时对 slotted 插件组件不跑 onMount，初始化必须内联在组件体或 setup 里；
+> 2. **数据层懒加载**——`data.shell.list()` / `session.status()` 背后的 store 初始为空，只靠事件增量维护；TUI 启动前已在跑的任务必须 `data.shell.sync()` + `data.session.sync(root, {children:true})` 拉全量，否则徽标恒零；
+> 3. **完成检测模式**——shell 退出即从 store 移除，标签会一并消失；需先用 `createEffect(on(list,…))` 把 id→label 存入本地 Map，列表 diff 发现消失时立即补进「已完成」信号量（60s 后超时清理）；
+> 4. **双徽标实例**（sidebar + footer）共享 storage key 会自动同步偏好，但副作用（通知）需模块级 Set 按 `id:完成时刻` 去重。
 
 ## 插件形态（TUI feature-plugin）
 

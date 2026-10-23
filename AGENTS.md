@@ -19,7 +19,8 @@
 7. **数据源现成**：`context.data.shell.list()`（只含在跑 shell，事件驱动维护）；子代理 = `data.session.list()` 里 parentID 非空且 `status(id)==="running"` 的会话；持久终端 = `context.client.experimental.persistentPty.list({sessionID})` + `persistent-pty.added/removed` 事件（需 `server.info().capabilities?.persistentPty !== false` 探测）——不需要新造数据层
 8. **侧边栏挂载点**：`routes/session/sidebar.tsx` 里 `<Slot path="sidebar.content" input={{sessionID}}>`；内置顺序 Context→MCP→Todo→Footer，外部插件 append 在后
 9. **渲染事实**（实测）：claim→resolve→render 全链路对自定义插件生效（prompt.footer 实证 render 被调用）；但**窄终端/无 tty 时 OpenTUI 不挂载 sidebar**，sidebar.content 的 claim 被 suppress——无头探针验证渲染必须换必挂载槽位或用真实终端
-10. **架构分权**：TUI 只是客户端（`opencode attach <url>` 可重连运行中的服务器）；后台任务挂在服务进程下，关 TUI 不死——本插件观测的就是服务端状态
+10. **OpenTUI 生命周期陷阱**（实测，v1.0 头号 bug 源）：**onMount 对 slotted 插件组件永不触发**——初始化代码必须放组件体/setup 内联；且数据层 store 懒加载（shell/session 列表初始为空，事件只在 sync 后进来）——**挂载时必须 `data.shell.sync()` + `data.session.sync(root,{children:true})`，否则徽标恒零**
+11. **架构分权**：TUI 只是客户端（`opencode attach <url>` 可重连运行中的服务器）；后台任务挂在服务进程下，关 TUI 不死——本插件观测的就是服务端状态
 
 ## 技术进度（v0.1 原型，四步）
 
