@@ -47,7 +47,7 @@
 - 环境：opencode v2.1.x（CLI 用 `opencode.cmd`，PowerShell 会拦截 .ps1）；插件**不需要** npm i / node_modules（peer 依赖由宿主提供）
 - 装载：`robocopy D:\Coding\oc-taskbar "$env:USERPROFILE\.config\opencode\plugins\oc-taskbar" /MIR /XD .git`，TUI 热重载；无头探针：`Start-Process opencode.cmd --print-logs [-c]` 重定向日志 + 12s 杀进程（注意 dump 文本是会话内容回显 + 增量渲染拆 cell，**不可 grep 验证渲染**，用 OC_TASKBAR_PROBE 或真实终端）
 - 验证循环：改 tui.tsx → robocopy 同步 → 真实 TUI 看侧边栏 → 开个后台任务看计数变化
-- 提交：conventional commits（`feat(slot): ...`、`docs: ...`）；本地仓暂无远程，用户建 GitHub 仓后再推
+- 提交：conventional commits（`feat(slot): ...`、`docs: ...`）；远程已建（2026-10-23）：`github.com/ntexplorer/oc-taskbar`（public，MIT）——提交后 `git push`；若 push 直连失败，按主手册仓 ai-dev-setup 的 AGENTS.md 坑位 8 处置（等待自愈或 gh api 通道）；部署归 ai-dev-setup 步骤 8 管辖（clone + robocopy），其他终端照该步骤即装
 
 ## 参考
 

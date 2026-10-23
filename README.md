@@ -35,6 +35,8 @@ robocopy D:\Coding\oc-taskbar "$env:USERPROFILE\.config\opencode\plugins\oc-task
 # 然后启动 opencode TUI；改代码后重新 robocopy，TUI 会热重载（watch + reconcile）
 ```
 
+其他电脑（或本机无克隆时）：`git clone https://github.com/ntexplorer/oc-taskbar.git D:\Coding\oc-taskbar` 后执行上面同一条 robocopy；已纳入 ai-dev-setup 部署手册步骤 8（默认项），用该仓配环境的机器照做即可。
+
 诊断开关：设 `OC_TASKBAR_PROBE=<文件路径>` 后，插件在徽标挂载与计数变化时向该文件追加一行（默认零 IO）。注意：无 tty 的重定向终端宽度不足时 OpenTUI 不挂载侧边栏，徽标自然不渲染——需在真实终端里验收。
 
 ## 开发
