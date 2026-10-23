@@ -60,6 +60,7 @@ type Pack = {
   readonly notifyDone: (label: string) => string
   readonly shell: {
     readonly label: Record<ShellKey, string>
+    readonly other: string
     readonly run: (cmd: string) => string
     readonly copyOne: (name: string) => string
     readonly moveOne: (name: string) => string
@@ -91,6 +92,7 @@ const PACKS: Record<Lang, Pack> = {
         move: "移动文件",
         http: "网络请求",
       },
+      other: "后台命令",
       run: (cmd) => `运行 ${cmd}`,
       copyOne: (name) => `复制 · ${name}`,
       moveOne: (name) => `移动 · ${name}`,
@@ -120,6 +122,7 @@ const PACKS: Record<Lang, Pack> = {
         move: "Move files",
         http: "HTTP request",
       },
+      other: "background command",
       run: (cmd) => `Run ${cmd}`,
       copyOne: (name) => `Copy · ${name}`,
       moveOne: (name) => `Move · ${name}`,
@@ -307,7 +310,12 @@ function describeShell(
     if (key) return { icon: SHELL_ICON[key], label: pack.shell.label[key] }
     if (firstExe === undefined) firstExe = exe
   }
-  return { icon: "💻", label: pack.shell.run(firstExe || fallbackName) }
+  // Fallback: only show the exe name when it reads like a command. Foreign
+  // PowerShell snippets from other sessions ("$x = …", "[Console]::…") would
+  // otherwise render as unreadable noise.
+  const exe = firstExe || fallbackName
+  if (!/^[A-Za-z][A-Za-z0-9._-]*$/.test(exe)) return { icon: "💻", label: pack.shell.other }
+  return { icon: "💻", label: pack.shell.run(exe) }
 }
 
 // Sub-agent titles are already natural language (written by the parent model
@@ -568,14 +576,30 @@ function createTaskStore(context: Plugin.Context) {
     }, RETAIN_MS + 1_000)
   }
 
+  // Reuse cached item objects when their visible fields haven't changed so
+  // Solid's <For> (reference-keyed) preserves row components — and their
+  // expanded state — across output-progress list events. Function declaration
+  // (hoisted) because the tracking effects above run once at creation, before
+  // control flow reaches this point.
+  function stable(item: TaskItem): TaskItem {
+    const cached = labelCache.get(item.id)
+    if (cached && cached.kind === item.kind && cached.icon === item.icon && cached.label === item.label) return cached
+    labelCache.set(item.id, item)
+    return item
+  }
+
   // Track disappearing shells (exited or deleted both remove from the store).
   // Reading pack() inside the handler also tracks the language signal, so a
   // language switch refreshes cached labels with no spurious completions
   // (the alive-diff finds nothing missing when only the language changed).
+  // Funnel through stable(): replacing the cache entry unconditionally would
+  // hand <For> a fresh object on every shell-output tick and rebuild (reset)
+  // each running row, killing its expanded state mid-click.
   createEffect(
     on(shells, (list, previous) => {
       for (const shell of list) {
-        labelCache.set(shell.id, shellItem(shell, pack()))
+        probe(`shell up ${shell.id}: ${JSON.stringify(shell.command)}`)
+        stable(shellItem(shell, pack()))
       }
       if (previous) {
         const alive = new Set(list.map((shell) => shell.id))
@@ -590,7 +614,7 @@ function createTaskStore(context: Plugin.Context) {
   createEffect(
     on(agents, (list, previous) => {
       for (const session of list) {
-        labelCache.set(session.id, agentItem(session, pack()))
+        stable(agentItem(session, pack()))
       }
       if (previous) {
         const alive = new Set(list.map((session) => session.id))
@@ -605,7 +629,7 @@ function createTaskStore(context: Plugin.Context) {
   createEffect(
     on(terminals, (list, previous) => {
       for (const pty of list) {
-        labelCache.set(pty.id, terminalItem(pty, pack()))
+        stable(terminalItem(pty, pack()))
       }
       if (previous) {
         const alive = new Set(list.map((pty) => pty.id))
@@ -650,16 +674,6 @@ function createTaskStore(context: Plugin.Context) {
     }),
   )
 
-  // Reuse cached item objects when their identity hasn't changed so Solid's
-  // <For> (reference-keyed) preserves rows — and their expanded state —
-  // across unrelated list updates.
-  const stable = (item: TaskItem): TaskItem => {
-    const cached = labelCache.get(item.id)
-    if (cached && cached.kind === item.kind && cached.icon === item.icon && cached.label === item.label) return cached
-    labelCache.set(item.id, item)
-    return item
-  }
-
   const running = createMemo<TaskItem[]>(() => {
     const p = pack()
     return [
@@ -694,8 +708,8 @@ function TaskRow(props: { item: TaskItem; theme: Plugin.Context["theme"]; pack: 
   // (agent titles may contain emoji) in half and render tofu.
   const chars = () => Array.from(props.item.label)
   return (
-    <box>
-      <text fg={fg} onclick={() => setExpanded((value) => !value)}>
+    <box onMouseDown={() => setExpanded((value) => !value)}>
+      <text fg={fg}>
         {props.done ? "✅" : props.item.icon} {chars().slice(0, expanded() ? 200 : 40).join("")}
         {chars().length > 40 && !expanded() ? "…" : ""}
         {props.done ? props.pack.doneSuffix : ""}
