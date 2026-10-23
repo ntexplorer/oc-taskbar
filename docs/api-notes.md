@@ -2,11 +2,13 @@
 
 来源：`anomalyco/opencode`（原 sst/opencode）`dev` 分支，v2.1.x。本文档是实现 `tui.tsx` 的依据，防止上游重构后迷失。
 
-> **v1.0 补充（实测教训，详见 AGENTS.md 事实 10）**：
+> **v1.0 补充（实测教训，详见 AGENTS.md 事实 10/12/13）**：
 > 1. **onMount 永不触发**——OpenTUI 的 Solid 运行时对 slotted 插件组件不跑 onMount，初始化必须内联在组件体或 setup 里；
 > 2. **数据层懒加载**——`data.shell.list()` / `session.status()` 背后的 store 初始为空，只靠事件增量维护；TUI 启动前已在跑的任务必须 `data.shell.sync()` + `data.session.sync(root, {children:true})` 拉全量，否则徽标恒零；
 > 3. **完成检测模式**——shell 退出即从 store 移除，标签会一并消失；需先用 `createEffect(on(list,…))` 把 id→label 存入本地 Map，列表 diff 发现消失时立即补进「已完成」信号量（60s 后超时清理）；
-> 4. **双徽标实例**（sidebar + footer）共享 storage key 会自动同步偏好，但副作用（通知）需模块级 Set 按 `id:完成时刻` 去重。
+> 4. **双徽标实例**（sidebar + footer）共享 storage key 会自动同步偏好，但副作用（通知）需模块级 Set 按 `id:完成时刻` 去重；
+> 5. **Slot input 变化 = 组件销毁重建**（事实 12）——切 tab 使 sidebar Slot 的 sessionID 变化，render 重调、实例连同一切本地 state 消失；无 input 的 `prompt.footer` 不重建（曾致 sidebar 重置而 footer 保留的不对称假象）。跨挂载状态必须放模块级 `createRoot` 单例，组件只做视图；
+> 6. **读取失败 ≠ 空列表**（事实 13）——`shell.list()` 等瞬时抛错若 catch 成 `[]`，与「全部退出」不可区分 → 假完成风暴（误通知 + 假残影）。所有读取 sticky last-good，失败保持旧值；`For` 按引用复用行，列表重建时用 id→对象缓存稳定引用。
 
 ## 插件形态（TUI feature-plugin）
 

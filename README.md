@@ -11,11 +11,12 @@ V1 时代底部 spinner 转 = 有任务在跑，停 = 全部结束，看一眼�
 - [x] 调研（2026-10-22）：TUI 插件槽位系统、内置 feature-plugins 机制、任务面板数据源均已确认存在
 - [x] v0.1 原型（2026-10-23）：`tui.tsx` 挂 `sidebar.content`，实时显示在跑 shell / subagent / 终端计数（详见 [docs/api-notes.md](docs/api-notes.md)）
 - [x] v1.0（2026-10-23）：计数恒零双根因修复（数据层懒加载需初始 sync；onMount 永不触发）+ 任务明细（点击展开）+ 完成保留 60s + 完成通知（默认开，storage 可关）+ `prompt.footer` 兜底一行徽标；无头探针实证 `total=2 shells=2`
-- [ ] v1.0 用户验收：真实 TUI 侧边栏肉眼确认 + 完成通知
+- [x] v1.0.1（2026-10-23）：修复切 tab 后侧边栏重置为 none（Slot input 变化会销毁重建组件，状态提升为模块级单例 store）+ 对抗审查加固 9 项（数据抖动 sticky last-good 防假完成、窄终端下 subagent 兜底同步、事件订阅防泄漏等）
+- [ ] v1.0.1 用户验收：真实 TUI 确认「开任务→切 tab→计数与残影不丢」+ 完成通知声音
 
 ## 使用
 
-侧边栏 **Tasks** 区块：`$` 行 = 在跑 shell（含命令）、`@` 行 = 在跑子代理、`>` 行 = 打开的终端；`✓` 行 = 60 秒内完成的任务；点击行展开完整命令。sidebar 关闭时 composer 底部显示一行 `⚙ N tasks` 兜底。任务完成时弹通知 + 声音（想关掉：改 `tui.tsx` 里 `storage.store("notify", …)` 的值，或让 agent 帮你加开关）。
+侧边栏 **Tasks** 区块：`$` 行 = 在跑 shell（含命令）、`@` 行 = 在跑子代理、`>` 行 = 打开的终端；`✓` 行 = 60 秒内完成的任务；点击行展开完整命令；切 tab 状态不丢（跟踪在模块级 store，组件只是视图）。sidebar 关闭时 composer 底部显示一行兜底徽标（有在跑任务 `⚙ N tasks (+M done)`；仅剩残影时 `⚙ +M done`）。任务完成时弹通知 + 声音（想关掉：改 `tui.tsx` 里 `storage.store("notify", …)` 的值，或让 agent 帮你加开关）。
 
 ## 安装
 
