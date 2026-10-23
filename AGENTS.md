@@ -6,25 +6,27 @@
 
 为 opencode V2 的 TUI 开发**任务监视插件**：把当前在跑的 **subagent / 后台 shell / terminal** 数量与状态**常驻**显示在侧边栏（或状态栏徽标），替代「按 ↓ 展开三栏」的手动观测。解决「会话看起来结束了但后台还有任务在跑，不知道能不能关机」的判断难题（V1 底部 spinner 在 V2 后台任务化后失效）。
 
-## 已验证事实（2026-10-22 调查，来源：zread sst/opencode 知识库）
+## 已验证事实（2026-10-22 调查，2026-10-23 实装载修正；来源：zread 知识库 + anomalyco/opencode 源码直读 + 本机实测）
 
 以下均为查证过的结论，可直接作为设计依据，不要重新猜：
 
-1. **TUI 架构**：SolidJS + `@opentui` GPU 加速渲染，代码在 monorepo 的 `packages/tui`
-2. **TUI 有插件槽位系统**：`packages/tui/src/plugin/slots.tsx`（UI 插入点定义）、`packages/tui/src/plugin/runtime.tsx`（插件运行时）、插件路由在 `packages/tui/src/app.tsx`（约 L215-340）
-3. **内置 feature-plugins 机制**：`packages/tui/src/feature-plugins/builtins.ts`——**WhichKey 弹窗就是插件实现的**，「往 TUI 插常驻 UI」是官方支持的扩展模式，有先例可抄
-4. **侧边栏已渲染 MCP 服务器**：存在现成的侧边栏内容挂载点（MCP Integration 文档）
-5. **V2 插件 API**：`@opencode-ai/plugin/v2/effect`（命令式注册：setup 期间 `ctx.domain.transform()` / `ctx.domain.hook()`，运行时重放变换）与 `@opencode-ai/plugin/v2/promise`（Promise 风格）两形态；内部与外部插件用同一 API
-6. **插件安装**：`opencode plugin <路径或包名>`（`-g` 全局、`-f` 强制替换重装）；本地路径可直接装载，改代码后 `-f` 重装验证
-7. **数据源现成**：TUI 按 ↓ 展开的三栏（subagent / shell / terminal）证明内部本就维护这套任务状态——插件订阅同一事件流即可，**不需要新造数据层**；服务端是 Effect-TS 服务层（`Effect.fn` 模式），任务/会话状态经服务层暴露给 TUI 与工具系统
-8. **架构分权**：TUI 只是客户端（`opencode attach <url>` 可重连运行中的服务器）；后台任务挂在服务进程下，关 TUI 不死——本插件观测的就是服务端状态
+1. **仓库已迁移**：`sst/opencode` → `anomalyco/opencode`（默认分支 `dev`）。老文档里的路径以新仓库为准
+2. **TUI 架构**：SolidJS + `@opentui` GPU 加速渲染，代码在 monorepo 的 `packages/tui`
+3. **插件 API 现行形态**（旧 slots.tsx/runtime.tsx 已被重构掉）：`import { Plugin } from "@opencode/plugin/tui"`，`Plugin.define({ id, setup(context) })`；setup 里 `context.ui.slot({ append: "<path>", render: (props) => <C/> })`。参考样板 `packages/tui/src/feature-plugins/sidebar/mcp.tsx`
+4. **插件入口规则**（实测）：TUI 入口 = 插件目录下的 `tui.ts(x)` 文件；`package.json` 的 main **完全不参与**；JSX 需 `jsx: "preserve"` + `jsxImportSource: "@opentui/solid"`（宿主 Bun 现场转译）
+5. **装载机制**（实测，v2.1.x）：插件目录 = `<config>/plugins/*` 与 `<项目>/.opencode/plugins/*` 的子目录；CLI `opencode plugin add` 只收 npm/git 规格（`file:` 被拒），本地开发 = 直接把项目副本放进 plugins 目录（Windows 无符号链接权限时用 robocopy）；目录变更触发热重载（watch + reconcile）
+6. **peer 依赖由宿主提供**：solid-js、@opentui/*、@opencode/theme、`@opencode/plugin` 全部映射到宿主副本，插件目录**不需要 node_modules**
+7. **数据源现成**：`context.data.shell.list()`（只含在跑 shell，事件驱动维护）；子代理 = `data.session.list()` 里 parentID 非空且 `status(id)==="running"` 的会话；持久终端 = `context.client.experimental.persistentPty.list({sessionID})` + `persistent-pty.added/removed` 事件（需 `server.info().capabilities?.persistentPty !== false` 探测）——不需要新造数据层
+8. **侧边栏挂载点**：`routes/session/sidebar.tsx` 里 `<Slot path="sidebar.content" input={{sessionID}}>`；内置顺序 Context→MCP→Todo→Footer，外部插件 append 在后
+9. **渲染事实**（实测）：claim→resolve→render 全链路对自定义插件生效（prompt.footer 实证 render 被调用）；但**窄终端/无 tty 时 OpenTUI 不挂载 sidebar**，sidebar.content 的 claim 被 suppress——无头探针验证渲染必须换必挂载槽位或用真实终端
+10. **架构分权**：TUI 只是客户端（`opencode attach <url>` 可重连运行中的服务器）；后台任务挂在服务进程下，关 TUI 不死——本插件观测的就是服务端状态
 
-## 技术路径（v0.1 原型，四步）
+## 技术进度（v0.1 原型，四步）
 
-1. **摸 API**：zread 读 `sst/opencode` 的 `packages/tui/src/plugin/slots.tsx` 与 WhichKey 的 builtin 实现，弄清 slot 注册与渲染组件签名（用 zread 的 `read_file`/`get_repo_structure`，不用 clone）
-2. **最小渲染**：注册一个 sidebar slot，渲染固定文本徽标（如 `⚙ 2 tasks`）——本地 `opencode plugin .` 装载，TUI 里能看到即里程碑一
-3. **接数据**：定位 ↓ 三栏的数据源（服务层任务状态流），订阅事件更新计数——开一个后台任务，徽标实时变化即里程碑二（v0.1 验收线）
-4. **打磨**：点击/展开显示任务明细列表、完成后短暂保留状态、零任务时淡显——进入 v1.0 迭代
+1. **摸 API** ✅：现行插件 API、SlotClaim、Context、数据源、装载机制全部查证并固化到 `docs/api-notes.md`（含网络通道教训：webfetch+jsDelivr/blob API 可靠，本机 PowerShell 直连 GitHub 不通）
+2. **最小渲染** ✅：`tui.tsx` claim `sidebar.content`，setup 实测零报错；渲染链路经 `prompt.footer` 对照实验实证打通（见事实 9）
+3. **接数据** ✅ 代码 / ⏳ 验收：shell（data.shell.list）、subagent（session.list+status）、terminal（persistentPty.list+事件）三通道已实现，零任务时 dim 显示；待用户真实 TUI 肉眼验收「开后台任务→计数变化」（v0.1 验收线）
+4. **打磨**（v1.0）：任务明细列表、完成后短暂保留、零任务淡显、`attention.notify` 完成通知、`prompt.footer` 紧凑徽标（sidebar 关闭时兜底）
 
 ## 约束
 
@@ -36,8 +38,9 @@
 
 ## 开发工作流
 
-- 环境：Node ≥ 18；`npm i` 装依赖后 `opencode plugin . -f` 本地装载
-- 验证循环：改代码 → `opencode plugin . -f` → 开 TUI 看侧边栏 → 开个后台任务看徽标变化
+- 环境：opencode v2.1.x（CLI 用 `opencode.cmd`，PowerShell 会拦截 .ps1）；插件**不需要** npm i / node_modules（peer 依赖由宿主提供）
+- 装载：`robocopy D:\Coding\oc-taskbar "$env:USERPROFILE\.config\opencode\plugins\oc-taskbar" /MIR /XD .git`，TUI 热重载；无头探针：`Start-Process opencode.cmd --print-logs [-c]` 重定向日志 + 12s 杀进程（注意 dump 文本是会话内容回显 + 增量渲染拆 cell，**不可 grep 验证渲染**，用 OC_TASKBAR_PROBE 或真实终端）
+- 验证循环：改 tui.tsx → robocopy 同步 → 真实 TUI 看侧边栏 → 开个后台任务看计数变化
 - 提交：conventional commits（`feat(slot): ...`、`docs: ...`）；本地仓暂无远程，用户建 GitHub 仓后再推
 
 ## 参考
