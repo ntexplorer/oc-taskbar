@@ -23,6 +23,7 @@
 11. **架构分权**：TUI 只是客户端（`opencode attach <url>` 可重连运行中的服务器）；后台任务挂在服务进程下，关 TUI 不死——本插件观测的就是服务端状态
 12. **Slot 组件随 input 变化整体重建**（2026-10-23 实测，v1.0 头号 bug）：切换 tab → sidebar Slot 的 input（sessionID）变化 → render 重新调用 → **组件实例被销毁重建**，实例内一切本地 state（signal、缓存、onCleanup 挂的事件订阅）随之丢失；而 prompt.footer 的 Slot 无 input，切 tab 不重建——曾致「sidebar 切 tab 后重置为 none、footer 却保留 (+N done)」。对策：任务跟踪全部放模块级 `createRoot` 单例 store（setup 时创建），组件退化为纯视图。已知开发期干扰：热重载重载模块会建第二个 store，旧 root 不 dispose——重启 TUI 前可能 probe 双行/通知双响
 13. **数据读取必须 sticky last-good**（对抗审查发现）：`data.shell.list()`/`session.list()` 瞬时抛错若 catch 成 `[]`，与「任务全部退出」不可区分 → 假完成风暴（误响通知+假残影 60s）。所有读取失败一律返回上次好值；`persistentPty.list` 失败保持旧列表不清空（误报完成比漏报危险——「能不能关机」判断场景）
+14. **内置 Todo 侧边栏与插件不冲突、语义互补**（2026-10-23 调研）：v2 有 `packages/tui/src/feature-plugins/sidebar/todo.tsx`，显示会话中**最近一次完成的 `todowrite` 工具调用**内容（`util/todo.ts` 的 `sessionTodos` findLast 解析，四态 `[ ] [•] [✓] [-]`，>2 项可 `onMouseDown` 折叠）。更新完全依赖模型自觉调工具——「执行中忘记勾完成」的 v1 痛点 v2 依旧。与 oc-taskbar：数据源不同（message 流 vs shell/session/pty 客观状态）、挂载不冲突（内置在 Slot 内部上方、插件 append 下方）、语义互补（todo=计划/主观可过期，taskbar=执行/客观实时）——插件恰好是 todo 不可信的解药
 
 ## 技术进度（v0.1 原型，四步）
 

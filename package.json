@@ -1,6 +1,6 @@
 {
   "name": "oc-taskbar",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Persistent task monitor (subagent/shell/terminal) for the OpenCode V2 TUI sidebar",
   "type": "module",
   "private": true,
