@@ -22,6 +22,11 @@ const RETAIN_MS = 60_000
 // families on this cadence so the footer fallback still sees fresh subagents.
 const FALLBACK_POLL_MS = 30_000
 
+// Belt-and-braces re-sync cadence for the shell list: the client data layer is
+// purely event-driven and events lost while disconnected are never replayed
+// (see the reconnect self-heal in createTaskStore).
+const RESYNC_MS = 60_000
+
 const short = (id: string) => id.slice(-6)
 
 // ---------------------------------------------------------------------------
@@ -520,6 +525,33 @@ function createTaskStore(context: Plugin.Context) {
   } catch {
     /* terminal events unavailable; refresh on remount still covers most changes */
   }
+
+  // ---- reconnect self-heal (v1.1.2) ----
+  // The client data layer maintains the shell list ONLY from shell.created/exited/
+  // deleted events plus an explicit sync(). A disconnect invalidates its read cache
+  // and the host's server.connected handler re-pulls session.active/location/vcs/
+  // project — but NOT shells ("active UI owners decide what to sync again"). Shells
+  // that started or exited inside the reconnect gap stayed invisible here forever
+  // (the built-in panel reads the message stream, which re-syncs on invalidation —
+  // hence "panel shows 2 / sidebar shows none"). Take ownership: full re-sync on
+  // server.connected, plus a low-cadence shell poll as belt-and-braces.
+  const resyncShells = () => {
+    probe("resync shells")
+    void data.shell.sync().catch(() => undefined)
+    void refreshTerminals()
+  }
+  const resyncAll = () => {
+    probe("resync all (server.connected)")
+    resyncShells()
+    for (const root of hydratedRoots) void data.session.sync(root, { children: true }).catch(() => undefined)
+    void fallbackHydrate()
+  }
+  try {
+    void (data.on as (t: string, h: () => void) => () => void)("server.connected", resyncAll)
+  } catch {
+    /* reconnect events unavailable; the poll below still heals the shell list */
+  }
+  setInterval(resyncShells, RESYNC_MS)
 
   // ---- running shells (location-wide, matches the built-in task panel).
   // On read failure keep the last good list: a transient error must not look
