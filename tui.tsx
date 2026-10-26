@@ -557,7 +557,15 @@ function createTaskStore(context: Plugin.Context) {
   } catch {
     /* reconnect events unavailable; the poll below still heals the shell list */
   }
-  setInterval(resyncShells, RESYNC_MS)
+  // Belt-and-braces tick: shells + terminals + already-hydrated root families.
+  // Root families matter here: subagent events lost in a disconnect gap have NO
+  // other fallback if the server.connected handler above ever fails to fire —
+  // this tick is what heals that channel. fallbackHydrate (full session scan)
+  // stays out of the steady-state tick.
+  setInterval(() => {
+    resyncShells()
+    for (const root of hydratedRoots) void data.session.sync(root, { children: true }).catch(() => undefined)
+  }, RESYNC_MS)
 
   // ---- running shells (location-wide, matches the built-in task panel).
   // On read failure keep the last good list: a transient error must not look
@@ -748,6 +756,15 @@ function createTaskStore(context: Plugin.Context) {
   } catch {
     /* keep default */
   }
+  // Root sessions complete on every Q&A round, so the 💬 channel gets its own
+  // toggle (default on) — silencing it without losing shell/agent/terminal pings.
+  let notifyRootEnabled: () => boolean = () => true
+  try {
+    const [rootEnabled] = context.storage.store("notifyRoot", { initial: true })
+    if (typeof rootEnabled === "function") notifyRootEnabled = () => Boolean(rootEnabled())
+  } catch {
+    /* keep default */
+  }
   const notified = new Set<string>()
   createEffect(
     on(completed, (list, previous) => {
@@ -756,6 +773,7 @@ function createTaskStore(context: Plugin.Context) {
       for (const entry of fresh) {
         const key = `${entry.id}:${entry.at}`
         if (notified.has(key)) continue
+        if (entry.kind === "root" && !notifyRootEnabled()) continue
         notified.add(key)
         if (notified.size > 200) {
           for (const oldest of [...notified].slice(0, 100)) notified.delete(oldest)
