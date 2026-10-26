@@ -62,6 +62,7 @@ type Pack = {
   readonly doneSuffix: string
   readonly terminal: string
   readonly agent: string
+  readonly rootBusy: string
   readonly notifyDone: (label: string) => string
   readonly shell: {
     readonly label: Record<ShellKey, string>
@@ -83,6 +84,7 @@ const PACKS: Record<Lang, Pack> = {
     doneSuffix: " · 完成了",
     terminal: "终端",
     agent: "子代理",
+    rootBusy: "主会话进行中",
     notifyDone: (label) => `✅ ${label} 完成了`,
     shell: {
       label: {
@@ -113,6 +115,7 @@ const PACKS: Record<Lang, Pack> = {
     doneSuffix: " · done",
     terminal: "terminal",
     agent: "subagent",
+    rootBusy: "main session busy",
     notifyDone: (label) => `✅ ${label} finished`,
     shell: {
       label: {
@@ -372,7 +375,7 @@ function describeAgent(
 
 type PtyInfo = { id: string; title?: string }
 
-type TaskKind = "shell" | "agent" | "terminal"
+type TaskKind = "shell" | "agent" | "terminal" | "root"
 
 type TaskItem = {
   readonly kind: TaskKind
@@ -380,6 +383,9 @@ type TaskItem = {
   readonly icon: string
   readonly label: string
   readonly detail?: string
+  // v1.2: busy root session of the tab being watched — muted rendering, and
+  // excluded from the footer badge / completion trail (foreground work).
+  readonly dim?: boolean
 }
 
 type CompletedItem = TaskItem & { readonly at: number }
@@ -581,6 +587,36 @@ function createTaskStore(context: Plugin.Context) {
     }
   })
 
+  // ---- v1.2 channel 4: busy root sessions (the main conversation itself
+  // running — the blind spot of the other three channels when a foreground
+  // tool/MCP call hangs with no shell, subagent, or terminal attached). Sticky
+  // last-good like every other read. ----
+  let lastRoots: SessionList = []
+  const roots = createMemo(() => {
+    try {
+      const list = (data.session.list() ?? []).filter(
+        (session) => session.parentID === undefined && data.session.status(session.id) === "running",
+      )
+      lastRoots = list
+      return list
+    } catch {
+      return lastRoots
+    }
+  })
+
+  // Family root of the tab the sidebar is showing (a child session's input
+  // resolves upward). Its busy row renders dim and stays out of the completion
+  // trail: the user is watching that conversation answer live.
+  const activeRoot = createMemo<string | undefined>(() => {
+    const id = activeSession()
+    if (!id) return undefined
+    try {
+      return data.session.get(id)?.parentID ?? id
+    } catch {
+      return id
+    }
+  })
+
   // ---- friendly item builders (icon + localized label, raw text in detail) ----
   const shellItem = (shell: ShellList[number], p: Pack): TaskItem => {
     const desc = describeShell(shell.command, `shell ${short(shell.id)}`, p)
@@ -589,6 +625,10 @@ function createTaskStore(context: Plugin.Context) {
   const agentItem = (session: SessionList[number], p: Pack): TaskItem => {
     const desc = describeAgent(session.title, `${p.agent} ${short(session.id)}`)
     return { kind: "agent", id: session.id, icon: desc.icon, label: desc.label, detail: desc.detail }
+  }
+  const rootItem = (session: SessionList[number], p: Pack, dim: boolean): TaskItem => {
+    const cleaned = cleanTitle(session.title ?? "")
+    return { kind: "root", id: session.id, icon: "💬", label: cleaned || p.rootBusy, dim: dim || undefined }
   }
   const terminalItem = (pty: PtyInfo, p: Pack): TaskItem => ({
     kind: "terminal",
@@ -615,7 +655,14 @@ function createTaskStore(context: Plugin.Context) {
   // control flow reaches this point.
   function stable(item: TaskItem): TaskItem {
     const cached = labelCache.get(item.id)
-    if (cached && cached.kind === item.kind && cached.icon === item.icon && cached.label === item.label) return cached
+    if (
+      cached &&
+      cached.kind === item.kind &&
+      cached.icon === item.icon &&
+      cached.label === item.label &&
+      cached.dim === item.dim
+    )
+      return cached
     labelCache.set(item.id, item)
     return item
   }
@@ -652,6 +699,26 @@ function createTaskStore(context: Plugin.Context) {
         const alive = new Set(list.map((session) => session.id))
         for (const session of previous) {
           if (!alive.has(session.id)) remember(agentItem(session, pack()))
+        }
+      }
+    }),
+  )
+
+  // Track root sessions transitioning running -> idle. The tab being watched
+  // skips the trail entirely: every question/answer would otherwise ring a
+  // notification and paint a 60s ghost of a conversation the user just saw
+  // answer. Other tabs get the full completion treatment.
+  createEffect(
+    on(roots, (list, previous) => {
+      const current = activeRoot()
+      for (const session of list) {
+        stable(rootItem(session, pack(), session.id === current))
+      }
+      if (previous) {
+        const alive = new Set(list.map((session) => session.id))
+        for (const session of previous) {
+          if (alive.has(session.id) || session.id === current) continue
+          remember(rootItem(session, pack(), false))
         }
       }
     }),
@@ -708,7 +775,9 @@ function createTaskStore(context: Plugin.Context) {
 
   const running = createMemo<TaskItem[]>(() => {
     const p = pack()
+    const current = activeRoot()
     return [
+      ...roots().map((session) => stable(rootItem(session, p, session.id === current))),
       ...shells().map((shell) => stable(shellItem(shell, p))),
       ...agents().map((session) => stable(agentItem(session, p))),
       ...terminals().map((pty) => stable(terminalItem(pty, p))),
@@ -724,7 +793,7 @@ function createTaskStore(context: Plugin.Context) {
       grandTotal,
       (value) =>
         probe(
-          `total=${value} running=${running().length} shells=${shells().length} agents=${agents().length} terminals=${terminals().length} done=${stale().length} session=${activeSession() ?? "-"} lang=${lang()}`,
+          `total=${value} running=${running().length} roots=${roots().length} shells=${shells().length} agents=${agents().length} terminals=${terminals().length} done=${stale().length} session=${activeSession() ?? "-"} lang=${lang()}`,
         ),
       { defer: true },
     ),
@@ -735,7 +804,9 @@ function createTaskStore(context: Plugin.Context) {
 
 function TaskRow(props: { item: TaskItem; theme: Plugin.Context["theme"]; pack: Pack; done?: boolean }) {
   const [expanded, setExpanded] = createSignal(false)
-  const fg = props.done ? props.theme.text.muted : props.theme.text.base
+  // done and dim share the muted color: dim marks the busy root session of the
+  // tab being watched (v1.2), done marks the 60s completion trail.
+  const fg = props.done || props.item.dim ? props.theme.text.muted : props.theme.text.base
   // Truncate by code points: slicing UTF-16 units can cut a surrogate pair
   // (agent titles may contain emoji) in half and render tofu.
   const chars = () => Array.from(props.item.label)
@@ -782,13 +853,15 @@ export function FooterBadge(props: { context: Plugin.Context; sessionID?: string
   createEffect(() => tasks.track(props.sessionID))
   const label = () => {
     const p = tasks.pack()
-    const runningCount = tasks.running().length
+    // Dim rows (the current tab's own busy session) are foreground work the
+    // user is watching — the footer badge counts background work only.
+    const runningCount = tasks.running().filter((item) => !item.dim).length
     const doneCount = tasks.stale().length
-    if (runningCount === 0) return p.footer.doneOnly(doneCount)
+    if (runningCount === 0) return doneCount > 0 ? p.footer.doneOnly(doneCount) : undefined
     return p.footer.tasks(runningCount, doneCount)
   }
   return (
-    <Show when={tasks.grandTotal() > 0}>
+    <Show when={label() !== undefined}>
       <text fg={props.context.theme.text.base}>{label()}</text>
     </Show>
   )
