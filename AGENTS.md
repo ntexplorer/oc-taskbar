@@ -46,11 +46,11 @@
 
 ## 开发工作流
 
-- **接续指引**：新会话先读本文件 → 看「技术进度」验收状态（当前：**v1.1.2 + v1.2.0 已实现、已同步插件目录（2026-10-26），待用户重启 TUI 后验收**：①v1.1.2 断连自愈——开后台任务→断网/合盖几秒→重连后侧栏应自动补上（第 7 条，probe 见 `resync all`）②v1.2 💬 根会话行——当前 tab dim、完成不通知不残影；其他 tab 完整待遇（第 6 条落地记录）③v1.1 遗留终验：`💻 后台命令` 兜底标签、「开任务→切 tab→计数与残影不丢」。已验收 ✓：emoji/中文语种/残影/通知/跨 tab 任务/点击展开）→ 部署已闭环（ai-dev-setup 步骤 8 + 待办 9 关闭，2026-10-23）。**下一开发项：无——等验收反馈**；低优先级候选见 README v1.2 条。本仓改动提交后须重新 robocopy 才会生效；**凡 robocopy 后重启 TUI 再验收**（热重载残留，见第 5 条）
+- **接续指引**：新会话先读本文件 → 看「技术进度」验收状态（当前：**v1.1.2 + v1.2.0 + 对抗审查加固批已实现、已推送已部署（fe58316，2026-10-26 收工），待用户重启 TUI 后验收**：①v1.1.2 断连自愈——开后台任务→断网/合盖几秒→重连后侧栏应自动补上（第 7 条，probe 见 `resync all` 行=主路径活）②v1.2 💬 根会话行——当前 tab dim、完成不通知不残影；其他 tab 完整待遇（第 6 条落地记录）③💬 通知嫌吵可单独关：`storage.store("notifyRoot")` ④v1.1 遗留终验：`💻 后台命令` 兜底标签、「开任务→切 tab→计数与残影不丢」。已验收 ✓：emoji/中文语种/残影/通知/跨 tab 任务/点击展开）→ 部署已闭环（ai-dev-setup 步骤 8 + 待办 9 关闭，2026-10-23）。**下一开发项：无——等验收反馈**；对抗审查遗留观察点两项（低优先级）：完成瞬间与切 tab 间 activeRoot 判定竞态（可能多响/漏响一声，知悉即可）、💬 行是否含其他项目 location 的会话未验证（多项目同开时留意）；低优先级候选见 README v1.2 条。本仓改动提交后须重新 robocopy 才会生效；**凡 robocopy 后重启 TUI 再验收**（热重载残留，见第 5 条）
 - 环境：opencode v2.1.x（CLI 用 `opencode.cmd`，PowerShell 会拦截 .ps1）；插件**不需要** npm i / node_modules（peer 依赖由宿主提供）
 - 装载：`robocopy D:\Coding\oc-taskbar "$env:USERPROFILE\.config\opencode\plugins\oc-taskbar" /MIR /XD .git`，TUI 热重载；无头探针：`Start-Process opencode.cmd --print-logs [-c]` 重定向日志 + 12s 杀进程（2026-10-23 实测 taskkill /T 只杀 cmd 壳、opencode.exe 子进程泄漏——上午探针累计泄漏 16 个僵尸进程连着服务；清杀法：`Get-WmiObject Win32_Process -Filter "name='opencode.exe'" | Where-Object CommandLine -match '--print-logs' | ForEach-Object { Stop-Process $_.ProcessId -Force }`）（注意 dump 文本是会话内容回显 + 增量渲染拆 cell，**不可 grep 验证渲染**，用 OC_TASKBAR_PROBE 或真实终端）
 - 验证循环：改 tui.tsx → robocopy 同步 → 真实 TUI 看侧边栏 → 开个后台任务看计数变化
-- 提交：conventional commits（`feat(slot): ...`、`docs: ...`）；远程已建（2026-10-23）：`github.com/ntexplorer/oc-taskbar`（public，MIT）——提交后 `git push`；若 push 直连失败，按主手册仓 ai-dev-setup 的 AGENTS.md 坑位 8 处置（等待自愈或 gh api 通道）；部署归 ai-dev-setup 步骤 8 管辖（clone + robocopy），其他终端照该步骤即装
+- 提交：conventional commits（`feat(slot): ...`、`docs: ...`）；远程已建（2026-10-23）：`github.com/ntexplorer/oc-taskbar`（public，MIT）——提交后 `git push`；若 push 直连失败，按主手册仓 ai-dev-setup 的 AGENTS.md 坑位 8 处置（等待自愈或 gh api 通道）；部署归 ai-dev-setup 步骤 8 管辖（clone + robocopy），其他终端照该步骤即装。**坑：多行/含引号 commit 消息别用 `git commit -m "..."`**——PowerShell 里 `\"` 不是转义（是给 cmd 的），消息会被截断成 pathspec 报错（2026-10-26 实测）；且 PowerShell 5.1 的 `Set-Content -Encoding UTF8` 带 BOM 会混入提交标题。正解：here-string 写临时文件 + **无 BOM** 写盘（`[IO.File]::WriteAllText($path, $msg, (New-Object System.Text.UTF8Encoding($false)))`）+ `git commit -F $path`；已混入 BOM 时 `git commit --amend -F`（重写文件去 BOM）+ `push --force-with-lease` 修复
 
 ## 参考
 
