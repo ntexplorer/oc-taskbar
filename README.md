@@ -18,6 +18,8 @@ V1 时代底部 spinner 转 = 有任务在跑，停 = 全部结束，看一眼�
 - [ ] 用户终验（⚠️ 2026-10-26 收工批 v1.1.2+v1.2.0 已部署，重启 TUI 后进行）：①💬 根会话行——当前 tab 提问出现淡显行、完成不响不残影；其他 tab 主会话跑长任务出现正常行+完成通知（嫌吵 `storage.store("notifyRoot")` 单独关）②断连自愈——开后台任务→断网几秒→重连→侧栏自动补上（README 下方 30 秒自检法）③`💻 后台命令` 兜底标签 ④回归「开任务→切 tab→计数与残影不丢」。已验收 ✓：emoji 显示、中文语种跟随、完成打勾残影、通知声音、跨 tab 任务显示、在跑行点击展开
 - [x] 部署收尾（2026-10-23）：ai-dev-setup 步骤 8（clone + robocopy）已写入、其待办 9 已关闭
 - [x] v1.2.0（2026-10-26）：第 4 通道「根会话忙碌」——根会话在跑（含前台工具/MCP 挂起，此前任务栏恒零的盲区）侧栏显示 `💬 + 会话标题`；当前 tab dim 显示、完成不打扰（无通知无残影），其他 tab 完整待遇；footer 徽标只计后台工作。低优先级候选：emoji 降级开关（`OC_TASKBAR_EMOJI=off`）、纯函数单测、日语纯汉字误判
+- [x] v1.2.1（2026-10-28）：修复 opencode 2.2.0 下插件加载失败——2.2.0 起 package.json 的 name+exports 参与入口判定，根导出 `"."` 被服务端当 server 入口去 import tui.tsx，服务端无 solid JSX 运行时致 `Cannot find package 'react'`；删除 main+exports 回落约定文件名模式（详见 AGENTS.md 事实 4）
+- [ ] v1.2.1 验收（⚠️ 2026-10-28 已部署，重启 TUI 后进行）：①插件面板 oc-taskbar 不再报 `Cannot find package 'react'`（若残留 "Plugin entrypoint not found" 属上游对 TUI-only 目录的预期外观，不算修复失败）②侧栏恢复「暂无任务」淡显 ③开后台任务出计数
 
 ## 使用
 
