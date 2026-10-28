@@ -1,12 +1,8 @@
 {
   "name": "oc-taskbar",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Persistent task monitor (subagent/shell/terminal) for the OpenCode V2 TUI sidebar",
   "type": "module",
   "private": true,
-  "license": "MIT",
-  "main": "./tui.tsx",
-  "exports": {
-    ".": "./tui.tsx"
-  }
+  "license": "MIT"
 }
