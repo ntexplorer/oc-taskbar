@@ -22,9 +22,9 @@ const RETAIN_MS = 60_000
 // families on this cadence so the footer fallback still sees fresh subagents.
 const FALLBACK_POLL_MS = 30_000
 
-// Belt-and-braces re-sync cadence for the shell list: the client data layer is
-// purely event-driven and events lost while disconnected are never replayed
-// (see the reconnect self-heal in createTaskStore).
+// Belt-and-braces reconcile cadence for the shell buckets: raw events lost
+// while disconnected are never replayed, so every known location is re-listed
+// over HTTP on this cadence (see the reconnect self-heal in createTaskStore).
 const RESYNC_MS = 60_000
 
 const short = (id: string) => id.slice(-6)
@@ -405,10 +405,9 @@ function createTaskStore(context: Plugin.Context) {
   const data = context.data
   probe("store create")
 
-  // ---- initial hydration: the data layer stays empty until the first sync.
-  // Runs here (store creation), never in onMount — OpenTUI never fires
-  // onMount for slotted plugin components. ----
-  void data.shell.sync().catch(() => undefined)
+  // Initial hydration lives in the shell channel and the session fallback
+  // below — both run synchronously at store creation, never in onMount
+  // (OpenTUI never fires onMount for slotted plugin components).
 
   // The sidebar passes its sessionID whenever a Taskbar mounts; terminal
   // listing, sub-session hydration, and language detection key off this
@@ -464,6 +463,124 @@ function createTaskStore(context: Plugin.Context) {
     hydrateRoot(root)
   })
 
+  // ---- running shells across ALL locations (v1.3) ----
+  // The host buckets shells per location (directory + optional workspaceID)
+  // and a no-argument data.shell.list() reads ONLY the default location's
+  // bucket — shells started by sessions elsewhere (other project directories,
+  // worktree/workspace locations) were invisible forever, and the old
+  // re-sync covered the default bucket only, so they never healed either.
+  // Own the channel: track every location this server works in, subscribe to
+  // the raw shell events (each carries its location), and reconcile every
+  // known bucket against the HTTP API.
+  type LocationRef = { readonly directory: string; readonly workspaceID?: string }
+  type ShellEntry = { readonly info: ShellList[number]; readonly bucket: string }
+
+  // Bucket key normalized for Windows path drift (case, trailing separators):
+  // the host's own key is a raw JSON.stringify of [directory, workspaceID],
+  // which would split one project into buckets that never reconcile.
+  const bucketKey = (ref: LocationRef): string => {
+    const dir = process.platform === "win32" ? ref.directory.toLowerCase() : ref.directory
+    return `${dir.replace(/[\\/]+$/, "")}|${ref.workspaceID ?? ""}`
+  }
+
+  const locations = new Map<string, LocationRef>()
+  // Per-bucket event counter: a reconcile response older than the latest
+  // event for its bucket is discarded (events are the fresher truth).
+  const bucketDirty = new Map<string, number>()
+  const [shellMap, setShellMap] = createSignal(new Map<string, ShellEntry>())
+
+  const reconcileBucket = async (ref: LocationRef) => {
+    const key = bucketKey(ref)
+    const dirty = bucketDirty.get(key) ?? 0
+    try {
+      const response = await (
+        context.client as { shell: { list: (input: unknown) => Promise<{ data?: ShellList }> } }
+      ).shell.list({ location: { directory: ref.directory, workspaceID: ref.workspaceID } })
+      if ((bucketDirty.get(key) ?? 0) !== dirty) return
+      const list = response?.data ?? []
+      setShellMap((previous) => {
+        const next = new Map(previous)
+        for (const [id, entry] of previous) if (entry.bucket === key) next.delete(id)
+        for (const info of list) next.set(info.id, { info, bucket: key })
+        return next
+      })
+      probe(`bucket ${key} -> ${list.length} running`)
+    } catch {
+      // Keep the last good entries: a failed read must never look like
+      // "everything exited" (false completions + phantom notifications).
+      probe(`bucket fail ${key}`)
+    }
+  }
+
+  const registerLocation = (ref: LocationRef | undefined) => {
+    if (!ref || typeof ref.directory !== "string" || ref.directory === "") return
+    const key = bucketKey(ref)
+    if (locations.has(key)) return
+    locations.set(key, ref)
+    probe(`location + ${key}`)
+    void reconcileBucket(ref)
+  }
+
+  const reconcileAll = () => {
+    for (const ref of locations.values()) void reconcileBucket(ref)
+  }
+
+  // Raw events bypass the data layer — including its silent drop of shell
+  // events without a location and its default-bucket-only reads.
+  const onShellEvent = (event: { location?: LocationRef; data?: unknown }) => {
+    registerLocation(event?.location)
+    const key = event?.location ? bucketKey(event.location) : ""
+    bucketDirty.set(key, (bucketDirty.get(key) ?? 0) + 1)
+    const created = (event?.data as { info?: ShellList[number] } | undefined)?.info
+    if (created?.id) {
+      setShellMap((previous) => {
+        const next = new Map(previous)
+        next.set(created.id, { info: created, bucket: key })
+        return next
+      })
+      return
+    }
+    const id = (event?.data as { id?: string } | undefined)?.id
+    if (!id) return
+    setShellMap((previous) => {
+      if (!previous.has(id)) return previous
+      const next = new Map(previous)
+      next.delete(id)
+      return next
+    })
+  }
+  for (const type of ["shell.created", "shell.exited", "shell.deleted"] as const) {
+    void (data.on as (t: string, h: (event: { location?: LocationRef; data?: unknown }) => void) => () => void)(
+      type,
+      onShellEvent,
+    )
+  }
+
+  // Seed with the default location; sessions and events grow the set. Both
+  // run at store creation — never in onMount (never fires for slotted plugins).
+  try {
+    registerLocation((data.location as { default?: () => LocationRef } | undefined)?.default?.())
+  } catch {
+    /* default location unavailable — events and the session scan still seed */
+  }
+
+  // Sessions carry their location; this also covers shells that were already
+  // running elsewhere before this plugin loaded (no event will ever fire).
+  const scanSessionLocations = () => {
+    try {
+      for (const session of data.session.list() ?? []) registerLocation((session as { location?: LocationRef }).location)
+    } catch {
+      /* a failed read keeps the current location set */
+    }
+  }
+
+  // Running shells = the registry values, order-stable for <For>.
+  const shells = createMemo<ShellList>(() =>
+    [...shellMap().values()]
+      .map((entry) => entry.info)
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+  )
+
   // Fallback for when the sidebar never mounts (narrow terminal suppresses
   // it, so track() never fires): pull sessions over HTTP and hydrate every
   // family that has children, repeating until a sidebar takes over.
@@ -475,6 +592,9 @@ function createTaskStore(context: Plugin.Context) {
         if (session.parentID) roots.add(session.parentID)
       }
       for (const root of roots) hydrateRoot(root)
+      // Seed the shell channel's bucket set with every location this server
+      // is working in (worktrees, other project directories).
+      for (const session of sessions) registerLocation((session as { location?: LocationRef }).location)
       // Footer-only mode has no tracked session — seed the language from the
       // majority of root-session titles so badges/notifications localize too.
       if (!ENV_LANG && !activeSession()) {
@@ -532,18 +652,15 @@ function createTaskStore(context: Plugin.Context) {
     /* terminal events unavailable; refresh on remount still covers most changes */
   }
 
-  // ---- reconnect self-heal (v1.1.2) ----
-  // The client data layer maintains the shell list ONLY from shell.created/exited/
-  // deleted events plus an explicit sync(). A disconnect invalidates its read cache
-  // and the host's server.connected handler re-pulls session.active/location/vcs/
-  // project — but NOT shells ("active UI owners decide what to sync again"). Shells
-  // that started or exited inside the reconnect gap stayed invisible here forever
-  // (the built-in panel reads the message stream, which re-syncs on invalidation —
-  // hence "panel shows 2 / sidebar shows none"). Take ownership: full re-sync on
-  // server.connected, plus a low-cadence shell poll as belt-and-braces.
+  // ---- reconnect self-heal (v1.1.2; v1.3 extends it to every bucket) ----
+  // Events lost in a disconnect gap are never replayed and the host's
+  // server.connected handler re-pulls sessions but never shells, so take
+  // ownership: reconcile every known location bucket over HTTP, and let the
+  // session list reveal locations not seen yet.
   const resyncShells = () => {
     probe("resync shells")
-    void data.shell.sync().catch(() => undefined)
+    reconcileAll()
+    scanSessionLocations()
     void refreshTerminals()
   }
   const resyncAll = () => {
@@ -555,31 +672,17 @@ function createTaskStore(context: Plugin.Context) {
   try {
     void (data.on as (t: string, h: () => void) => () => void)("server.connected", resyncAll)
   } catch {
-    /* reconnect events unavailable; the poll below still heals the shell list */
+    /* reconnect events unavailable; the tick below still heals every bucket */
   }
-  // Belt-and-braces tick: shells + terminals + already-hydrated root families.
-  // Root families matter here: subagent events lost in a disconnect gap have NO
-  // other fallback if the server.connected handler above ever fails to fire —
-  // this tick is what heals that channel. fallbackHydrate (full session scan)
-  // stays out of the steady-state tick.
+  // Belt-and-braces tick: every shell bucket + session-discovered locations +
+  // terminals + already-hydrated root families. Root families matter here:
+  // subagent events lost in a disconnect gap have NO other fallback if the
+  // server.connected handler above ever fails to fire. fallbackHydrate (full
+  // session scan) stays out of the steady-state tick.
   setInterval(() => {
     resyncShells()
     for (const root of hydratedRoots) void data.session.sync(root, { children: true }).catch(() => undefined)
   }, RESYNC_MS)
-
-  // ---- running shells (location-wide, matches the built-in task panel).
-  // On read failure keep the last good list: a transient error must not look
-  // like "everything exited" (false completions + phantom notifications). ----
-  let lastShells: ShellList = []
-  const shells = createMemo(() => {
-    try {
-      const list = data.shell.list() ?? []
-      lastShells = list
-      return list
-    } catch {
-      return lastShells
-    }
-  })
 
   // ---- running subagents: child sessions whose runner is active ----
   let lastAgents: SessionList = []
