@@ -2,6 +2,8 @@
 
 来源：`anomalyco/opencode`（原 sst/opencode）`dev` 分支，v2.1.x。本文档是实现 `tui.tsx` 的依据，防止上游重构后迷失。
 
+> **v1.3.0 补充（2026-11-06）**：下方「数据层懒加载」坑 2 的 `data.shell.*` 路线已**废弃**——宿主按 location（`[directory, workspaceID]`）给 shell 分桶，无参 `data.shell.list()/sync()` 只覆盖 TUI 启动目录桶（AGENTS.md 事实 16）；现插件直订原始 `shell.*` 事件 + 按桶 `client.shell.list({location})` 直连对账，不再依赖 `data.shell.*`。
+
 > **v1.0 补充（实测教训，详见 AGENTS.md 事实 10/12/13）**：
 > 1. **onMount 永不触发**——OpenTUI 的 Solid 运行时对 slotted 插件组件不跑 onMount，初始化必须内联在组件体或 setup 里；
 > 2. **数据层懒加载**——`data.shell.list()` / `session.status()` 背后的 store 初始为空，只靠事件增量维护；TUI 启动前已在跑的任务必须 `data.shell.sync()` + `data.session.sync(root, {children:true})` 拉全量，否则徽标恒零；
