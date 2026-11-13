@@ -1,6 +1,27 @@
 import { Plugin } from "@opencode/plugin/tui"
 import { createEffect, createMemo, createRoot, createSignal, For, on, Show } from "solid-js"
 import { appendFileSync } from "node:fs"
+import {
+  ageText,
+  contextUsage,
+  dailyStats,
+  fetchQuota,
+  formatCost,
+  formatPercent,
+  formatTokens,
+  gitStats,
+  localTimezone,
+  mergeQuota,
+  providerCost,
+  readProviderKeys,
+  startOfMonth,
+  startOfToday,
+  tokensTotal,
+  type ContextUsage,
+  type DailyStats,
+  type GitStats,
+  type QuotaState,
+} from "./statusline"
 
 // Opt-in diagnostics: set OC_TASKBAR_PROBE=<file> to append a line whenever
 // the plugin sets up, the store is created, or the task total changes. Zero
@@ -26,6 +47,20 @@ const FALLBACK_POLL_MS = 30_000
 // while disconnected are never replayed, so every known location is re-listed
 // over HTTP on this cadence (see the reconnect self-heal in createTaskStore).
 const RESYNC_MS = 60_000
+
+// Background subagent jobs are listed every 10s. This is the only source that
+// still shows a completed-but-unconsumed job after a platform wakeup loss
+// (issue #1); keep it independent from the session diff channel.
+const JOB_POLL_MS = 10_000
+
+// Today's token/cost aggregate (one SQLite rollup on the server).
+const STATS_POLL_MS = 60_000
+
+// Provider balances change slowly; manual /quota always forces a refresh.
+const QUOTA_TTL_MS = 5 * 60_000
+
+// Working-tree status is cheap on normal repos but can be slow on huge ones.
+const GIT_POLL_MS = 30_000
 
 const short = (id: string) => id.slice(-6)
 
@@ -75,6 +110,24 @@ type Pack = {
     readonly tasks: (running: number, done: number) => string
     readonly doneOnly: (done: number) => string
   }
+  readonly status: {
+    readonly header: string
+    readonly context: string
+    readonly session: string
+    readonly today: string
+    readonly quota: string
+    readonly git: string
+    readonly unacked: (count: number) => string
+    readonly unackedTitle: string
+    readonly ack: string
+    readonly ackAll: string
+    readonly open: string
+    readonly none: string
+    readonly settingsTitle: string
+    readonly refresh: string
+    readonly quotaTitle: string
+    readonly noQuota: string
+  }
 }
 
 const PACKS: Record<Lang, Pack> = {
@@ -105,8 +158,26 @@ const PACKS: Record<Lang, Pack> = {
       moveOne: (name) => `移动 · ${name}`,
     },
     footer: {
-      tasks: (n, m) => (m > 0 ? `🏃 ${n} 个任务（${m} 个完成）` : `🏃 ${n} 个任务`),
-      doneOnly: (n) => `✅ ${n} 个刚完成`,
+      tasks: (n, m) => (m > 0 ? `🏃${n} +${m}✅` : `🏃${n}`),
+      doneOnly: (n) => `✅${n}`,
+    },
+    status: {
+      header: "📊 用量",
+      context: "Context",
+      session: "本会话",
+      today: "今日",
+      quota: "配额",
+      git: "Git",
+      unacked: (n) => `🎫 未确认 (${n})`,
+      unackedTitle: "未确认的后台子代理",
+      ack: "标记已读",
+      ackAll: "全部已读",
+      open: "打开子会话",
+      none: "没有未确认的后台任务",
+      settingsTitle: "📊 用量状态栏设置",
+      refresh: "立即刷新",
+      quotaTitle: "配额与用量",
+      noQuota: "未找到可用的 DeepSeek / GLM 凭证",
     },
   },
   en: {
@@ -136,11 +207,26 @@ const PACKS: Record<Lang, Pack> = {
       moveOne: (name) => `Move · ${name}`,
     },
     footer: {
-      tasks: (n, m) => {
-        const unit = n === 1 ? "task" : "tasks"
-        return m > 0 ? `🏃 ${n} ${unit} (${m} done)` : `🏃 ${n} ${unit}`
-      },
-      doneOnly: (n) => `✅ ${n} just finished`,
+      tasks: (n, m) => (m > 0 ? `🏃${n} +${m}✅` : `🏃${n}`),
+      doneOnly: (n) => `✅${n}`,
+    },
+    status: {
+      header: "📊 Usage",
+      context: "Context",
+      session: "Session",
+      today: "Today",
+      quota: "Quota",
+      git: "Git",
+      unacked: (n) => `🎫 unacked (${n})`,
+      unackedTitle: "Unacked background subagents",
+      ack: "Mark read",
+      ackAll: "Mark all read",
+      open: "Open child session",
+      none: "No unacked background task",
+      settingsTitle: "📊 Usage statusline settings",
+      refresh: "Refresh now",
+      quotaTitle: "Quota & usage",
+      noQuota: "No usable DeepSeek / GLM credential found",
     },
   },
 }
@@ -389,6 +475,63 @@ type TaskItem = {
 }
 
 type CompletedItem = TaskItem & { readonly at: number }
+
+type JobStatus = "running" | "completed" | "error" | "cancelled"
+
+// The experimental job API lists active and *unconsumed* background jobs. A
+// completed job therefore remains visible when the host's wakeup/delivery
+// chain loses the notification (issue #1) — the durable signal the session
+// list cannot provide.
+type JobInfo = {
+  readonly id: string
+  readonly sessionID?: string
+  readonly childSessionID?: string
+  readonly status: JobStatus
+  readonly title?: string
+  readonly description?: string
+  readonly agent?: string
+  readonly time?: { readonly started?: number; readonly completed?: number }
+}
+
+type UnackedJob = {
+  readonly key: string
+  readonly id: string
+  readonly childSessionID?: string
+  readonly parentSessionID?: string
+  readonly label: string
+  readonly status: JobStatus
+  readonly at: number
+  readonly agent?: string
+}
+
+type StatusPrefs = {
+  context: boolean
+  session: boolean
+  today: boolean
+  quota: boolean
+  git: boolean
+  footer: boolean
+}
+
+const STATUS_DEFAULTS: StatusPrefs = {
+  context: true,
+  session: true,
+  today: true,
+  quota: true,
+  git: true,
+  footer: true,
+}
+
+const jobKey = (job: JobInfo): string =>
+  `${job.id}:${job.time?.completed ?? job.time?.started ?? 0}`
+
+const jobLabel = (job: JobInfo, fallback: string): string => {
+  const raw = cleanTitle(job.description ?? job.title ?? "")
+  return raw || fallback
+}
+
+const jobIcon = (status: JobStatus): string =>
+  status === "completed" ? "✅" : status === "error" ? "❌" : status === "cancelled" ? "⛔" : "🛰️"
 
 type ShellList = NonNullable<ReturnType<Plugin.Context["data"]["shell"]["list"]>>
 type SessionList = NonNullable<ReturnType<Plugin.Context["data"]["session"]["list"]>>
@@ -668,6 +811,10 @@ function createTaskStore(context: Plugin.Context) {
     resyncShells()
     for (const root of hydratedRoots) void data.session.sync(root, { children: true }).catch(() => undefined)
     void fallbackHydrate()
+    void syncJobs()
+    void refreshStats(true)
+    void refreshQuota(true)
+    void refreshGit(true)
   }
   try {
     void (data.on as (t: string, h: () => void) => () => void)("server.connected", resyncAll)
@@ -684,12 +831,27 @@ function createTaskStore(context: Plugin.Context) {
     for (const root of hydratedRoots) void data.session.sync(root, { children: true }).catch(() => undefined)
   }, RESYNC_MS)
 
+  // ---- background subagent jobs (issue #1) ----
+  // Kept separate from the reactive session list: a background job can finish
+  // while the TUI is disconnected or before its child session is loaded, and
+  // the job API still returns the completed-but-unconsumed row. Foreground
+  // subagents remain covered by the session diffs below.
+  const [jobs, setJobs] = createSignal<JobInfo[]>([])
+  const jobChildren = createMemo(() => new Set(jobs().flatMap((job) => (job.childSessionID ? [job.childSessionID] : []))))
+  // Child sessions already covered by the job channel must not be announced a
+  // second time by the session-list diff below.
+  const jobChildHistory = new Set<string>()
+
   // ---- running subagents: child sessions whose runner is active ----
   let lastAgents: SessionList = []
   const agents = createMemo(() => {
     try {
+      const inJob = jobChildren()
       const list = (data.session.list() ?? []).filter(
-        (session) => session.parentID !== undefined && data.session.status(session.id) === "running",
+        (session) =>
+          session.parentID !== undefined &&
+          data.session.status(session.id) === "running" &&
+          !inJob.has(session.id),
       )
       lastAgents = list
       return list
@@ -726,6 +888,514 @@ function createTaskStore(context: Plugin.Context) {
     } catch {
       return id
     }
+  })
+
+  // ---- usage statusline state -------------------------------------------------
+  // Preferences are durable; a failed storage read degrades to in-memory state
+  // instead of breaking the whole plugin.
+  let prefsStore: any
+  let setPrefsStore: ((mutation: (draft: StatusPrefs) => void) => Promise<void>) | undefined
+  const [fallbackPrefs, setFallbackPrefs] = createSignal<StatusPrefs>(STATUS_DEFAULTS)
+  try {
+    const [stored, setter] = context.storage.store<StatusPrefs>("statusline", { initial: STATUS_DEFAULTS })
+    prefsStore = stored
+    setPrefsStore = setter
+  } catch {
+    /* default prefs */
+  }
+  const prefs = (): StatusPrefs => (prefsStore ?? fallbackPrefs()) as StatusPrefs
+  const pref = (key: keyof StatusPrefs): boolean => Boolean(prefs()[key] ?? STATUS_DEFAULTS[key])
+  const togglePref = (key: keyof StatusPrefs) => {
+    const next = !pref(key)
+    try {
+      if (setPrefsStore) void setPrefsStore((draft) => { draft[key] = next })
+      else setFallbackPrefs((previous) => ({ ...previous, [key]: next }))
+    } catch {
+      /* preference persistence is best effort */
+    }
+    probe(`pref ${key}=${next}`)
+    if (next && (key === "quota" || key === "footer")) void refreshQuota(true)
+  }
+
+  // Completed background jobs are a durable "unread inbox": the server keeps
+  // returning them until its own notification is consumed, and the user's ack
+  // is stored locally so a replay never re-notifies.
+  type UnackedState = { items: UnackedJob[]; acked: Record<string, number> }
+  const UNACKED_INITIAL: UnackedState = { items: [], acked: {} }
+  let unackedStore: any
+  let setUnackedStore: ((mutation: (draft: UnackedState) => void) => Promise<void>) | undefined
+  const [fallbackUnacked, setFallbackUnacked] = createSignal<UnackedState>(UNACKED_INITIAL)
+  try {
+    const [stored, setter] = context.storage.store<UnackedState>("unacked", { initial: UNACKED_INITIAL })
+    unackedStore = stored
+    setUnackedStore = setter
+  } catch {
+    /* in-memory ledger */
+  }
+  const unackedState = (): UnackedState => {
+    const raw: any = unackedStore ?? fallbackUnacked()
+    return {
+      items: Array.isArray(raw?.items) ? raw.items : [],
+      acked: raw?.acked && typeof raw.acked === "object" ? raw.acked : {},
+    }
+  }
+  const unacked = createMemo<UnackedJob[]>(() => [...unackedState().items])
+  const unackedCount = createMemo(() => unacked().length)
+  const mutateUnacked = (mutation: (draft: UnackedState) => void) => {
+    try {
+      if (setUnackedStore) {
+        void setUnackedStore((draft) => {
+          if (!Array.isArray(draft.items)) draft.items = []
+          if (!draft.acked || typeof draft.acked !== "object") draft.acked = {}
+          mutation(draft)
+        })
+        return
+      }
+    } catch {
+      /* fall through to the in-memory copy */
+    }
+    setFallbackUnacked((previous) => {
+      const draft: UnackedState = { items: [...previous.items], acked: { ...previous.acked } }
+      mutation(draft)
+      return draft
+    })
+  }
+  const ackJob = (key: string) => {
+    mutateUnacked((draft) => {
+      draft.items = draft.items.filter((item) => item.key !== key)
+      draft.acked[key] = Date.now()
+    })
+    probe(`job ack ${key}`)
+  }
+  const ackAll = () => {
+    mutateUnacked((draft) => {
+      for (const item of draft.items) draft.acked[item.key] = Date.now()
+      draft.items = []
+    })
+    probe("job ack all")
+  }
+  const addUnacked = (job: JobInfo) => {
+    const key = jobKey(job)
+    if (unackedState().acked[key]) return
+    if (unacked().some((item) => item.key === key)) return
+    const fallback = `${pack().agent} ${short(job.childSessionID ?? job.id)}`
+    const item: UnackedJob = {
+      key,
+      id: String(job.id),
+      childSessionID: job.childSessionID,
+      parentSessionID: job.sessionID,
+      label: jobLabel(job, fallback),
+      status: job.status,
+      at: job.time?.completed ?? job.time?.started ?? Date.now(),
+      agent: job.agent,
+    }
+    mutateUnacked((draft) => {
+      draft.items = [item, ...draft.items.filter((entry) => entry.key !== key)].slice(0, 20)
+      const cutoff = Date.now() - 30 * 86_400_000
+      for (const [id, at] of Object.entries(draft.acked)) if (at < cutoff) delete draft.acked[id]
+    })
+  }
+
+  const [todayStats, setTodayStats] = createSignal<DailyStats>()
+  const [monthStats, setMonthStats] = createSignal<DailyStats>()
+  const [git, setGit] = createSignal<GitStats>()
+  const [quota, setQuota] = createSignal<QuotaState>({ errors: [] })
+
+  let lastContext: { id: string; value: ContextUsage } | undefined
+  const contextInfo = createMemo<ContextUsage | undefined>(() => {
+    const id = activeSession()
+    if (!id) return undefined
+    try {
+      const session = data.session.get(id)
+      if (!session) return undefined
+      const models = data.location.model.list((session as any).location) ?? []
+      const value = contextUsage(
+        data.session.message.list(id) ?? [],
+        models,
+        (session as any).revert?.messageID,
+      )
+      if (value) lastContext = { id, value }
+      return value ?? (lastContext?.id === id ? lastContext.value : undefined)
+    } catch {
+      return lastContext?.id === id ? lastContext.value : undefined
+    }
+  })
+
+  const sessionUsage = createMemo<{ tokens: number; cost: number; subagents: number } | undefined>(() => {
+    const id = activeSession()
+    if (!id) return undefined
+    try {
+      const info = data.session.get(id)
+      if (!info) return undefined
+      const ids = info.parentID
+        ? [id]
+        : [...new Set([id, ...data.session.family(id)])]
+      let tokens = 0
+      for (const sessionID of ids) {
+        const session = data.session.get(sessionID)
+        if (!session) continue
+        tokens += tokensTotal((session as any).tokens)
+      }
+      let cost = 0
+      try {
+        cost = Number(data.session.cost(id)) || 0
+      } catch {
+        /* keep zero */
+      }
+      return { tokens, cost, subagents: info.parentID ? 0 : Math.max(0, ids.length - 1) }
+    } catch {
+      return undefined
+    }
+  })
+
+  let statsReq = 0
+  let statsAt = 0
+  let monthReq = 0
+  let monthAt = 0
+  async function refreshStats(force = false) {
+    if (!force && Date.now() - statsAt < STATS_POLL_MS) return
+    const req = ++statsReq
+    try {
+      const raw = await (context.client as any).experimental.session.stats({
+        from: startOfToday(),
+        to: Date.now(),
+        timezone: localTimezone(),
+        tools: "none",
+      })
+      if (req !== statsReq) return
+      setTodayStats(dailyStats(raw))
+      statsAt = Date.now()
+      probe(`stats today cost=${raw?.cost ?? "?"}`)
+    } catch {
+      probe("stats today fail")
+    }
+  }
+  async function refreshMonthStats(force = false) {
+    if (!force && Date.now() - monthAt < STATS_POLL_MS) return
+    const req = ++monthReq
+    try {
+      const raw = await (context.client as any).experimental.session.stats({
+        from: startOfMonth(),
+        to: Date.now(),
+        timezone: localTimezone(),
+        tools: "none",
+      })
+      if (req !== monthReq) return
+      setMonthStats(dailyStats(raw))
+      monthAt = Date.now()
+      probe(`stats month cost=${raw?.cost ?? "?"}`)
+    } catch {
+      probe("stats month fail")
+    }
+  }
+
+  let gitReq = 0
+  let gitAt = 0
+  async function refreshGit(force = false) {
+    const id = activeSession()
+    if (!id) return
+    if (!force && Date.now() - gitAt < GIT_POLL_MS) return
+    let location: any
+    try {
+      location = (data.session.get(id) as any)?.location ?? (data.location as any).default?.()
+      if (!location) return
+      void (data.location as any).vcs?.sync?.(location)
+    } catch {
+      return
+    }
+    const req = ++gitReq
+    try {
+      const response = await (context.client as any).vcs.status({ location })
+      if (req !== gitReq) return
+      let branch: string | undefined
+      try {
+        branch = (data.location as any).vcs?.info?.(location)?.branch?.current
+      } catch {
+        /* branch is optional */
+      }
+      setGit(gitStats(response?.data, branch))
+      gitAt = Date.now()
+      probe(`git files=${response?.data?.length ?? 0}`)
+    } catch {
+      probe("git fail")
+    }
+  }
+
+  let quotaReq = 0
+  let quotaAt = 0
+  async function refreshQuota(force = false) {
+    if (!force && !pref("quota") && !pref("footer")) return
+    if (!force && Date.now() - quotaAt < QUOTA_TTL_MS) return
+    const req = ++quotaReq
+    try {
+      const keys = await readProviderKeys(context.client)
+      const fresh = await fetchQuota(keys)
+      if (req !== quotaReq) return
+      setQuota((previous) => mergeQuota(previous, fresh))
+      quotaAt = Date.now()
+      probe(
+        `quota ds=${fresh.deepseek ? "ok" : "-"} glm=${fresh.zhipuFive || fresh.zhipuWeek ? "ok" : "-"} errors=${fresh.errors.join(";") || "-"}`,
+      )
+    } catch (error) {
+      probe(`quota fail ${String(error)}`)
+    }
+  }
+
+  const activeJobs = createMemo<TaskItem[]>(() => {
+    const p = pack()
+    return jobs()
+      .filter((job) => job.status === "running")
+      .map((job) => {
+        const desc = describeAgent(job.description ?? job.title, `${p.agent} ${short(job.childSessionID ?? job.id)}`)
+        return {
+          kind: "agent" as const,
+          id: `job:${job.id}`,
+          icon: desc.icon,
+          label: desc.label,
+          detail: job.childSessionID,
+        }
+      })
+  })
+
+  const notifiedJobs = new Set<string>()
+  function notifyJob(job: JobInfo) {
+    const key = jobKey(job)
+    if (notifiedJobs.has(key)) return
+    notifiedJobs.add(key)
+    if (!notifyEnabled()) return
+    const p = pack()
+    const label = jobLabel(job, `${p.agent} ${short(job.childSessionID ?? job.id)}`)
+    try {
+      const result = context.attention.notify({
+        message: p.notifyDone(label),
+        notification: { when: "always" },
+        sound: { name: "subagent_done" },
+      })
+      void Promise.resolve(result)
+        .then((value: any) => probe(`notify job ${key} ok=${value?.ok} skipped=${value?.skipped ?? "-"}`))
+        .catch((error) => probe(`notify job fail ${key}: ${String(error)}`))
+    } catch (error) {
+      probe(`notify job fail ${key}: ${String(error)}`)
+    }
+  }
+
+  let jobReq = 0
+  let jobsPrimed = false
+  let lastJobs = new Map<string, JobInfo>()
+  async function syncJobs() {
+    const req = ++jobReq
+    try {
+      const raw = await (context.client as any).experimental.job.list({ kind: "subagent" })
+      if (req !== jobReq) return
+      const list: JobInfo[] = Array.isArray(raw) ? raw : []
+      const previous = lastJobs
+      lastJobs = new Map(list.map((job) => [String(job.id), job]))
+      for (const job of list) if (job.childSessionID) jobChildHistory.add(job.childSessionID)
+      if (jobChildHistory.size > 500) {
+        for (const id of [...jobChildHistory].slice(0, 200)) jobChildHistory.delete(id)
+      }
+      setJobs(list)
+      const primed = jobsPrimed
+      for (const job of list) {
+        if (job.status === "running") continue
+        addUnacked(job)
+        const old = previous.get(String(job.id))
+        const recent = (job.time?.completed ?? 0) > Date.now() - 5 * 60_000
+        if (primed && (old?.status === "running" || (!old && recent))) notifyJob(job)
+      }
+      jobsPrimed = true
+      probe(`jobs ${list.length} running=${list.filter((job) => job.status === "running").length}`)
+    } catch {
+      probe("jobs fail")
+    }
+  }
+
+  function openJob(item: UnackedJob | undefined) {
+    if (!item?.childSessionID) return
+    try {
+      context.ui.router.navigate({ type: "session", sessionID: item.childSessionID })
+    } catch {
+      /* navigation is optional */
+    }
+  }
+
+  async function showCompleted() {
+    const p = pack()
+    const items = unacked()
+    if (items.length === 0) {
+      context.ui.toast.show({ message: p.status.none })
+      return
+    }
+    try {
+      const selected = await context.ui.dialog.select<string>({
+        title: `${p.status.unackedTitle} (${items.length})`,
+        options: items.map((item) => ({
+          title: `${jobIcon(item.status)} ${item.label}`,
+          value: item.key,
+          description: `${item.status} · ${new Date(item.at).toLocaleString()} · ${item.childSessionID ?? "-"}`,
+          footer: item.agent,
+        })),
+        actions: [
+          {
+            bind: "m",
+            title: p.status.ack,
+            selection: "required",
+            onTrigger: (key) => {
+              ackJob(key)
+              context.ui.dialog.clear()
+              context.ui.toast.show({ message: p.status.ack })
+            },
+          },
+          {
+            bind: "o",
+            title: p.status.open,
+            selection: "required",
+            onTrigger: (key) => {
+              context.ui.dialog.clear()
+              openJob(items.find((item) => item.key === key))
+            },
+          },
+          {
+            bind: "a",
+            title: p.status.ackAll,
+            selection: "none",
+            onTrigger: () => {
+              ackAll()
+              context.ui.dialog.clear()
+            },
+          },
+        ],
+      })
+      if (selected) openJob(items.find((item) => item.key === selected))
+    } catch {
+      /* dialog unavailable */
+    }
+  }
+
+  function refreshAll() {
+    void syncJobs()
+    void refreshStats(true)
+    void refreshMonthStats(true)
+    void refreshQuota(true)
+    void refreshGit(true)
+  }
+
+  async function showSettings() {
+    const p = pack()
+    const labels: Array<[keyof StatusPrefs, string, string]> = [
+      ["context", p.status.context, "Context % / tokens / limit"],
+      ["session", p.status.session, "Session tokens + cost"],
+      ["today", p.status.today, "All sessions today"],
+      ["quota", p.status.quota, "DeepSeek balance / GLM windows"],
+      ["git", p.status.git, "Branch + working tree stats"],
+      ["footer", "Footer", "Compact footer fallback"],
+    ]
+    for (;;) {
+      try {
+        const selected = await context.ui.dialog.select<keyof StatusPrefs | "refresh">({
+          title: p.status.settingsTitle,
+          options: [
+            ...labels.map(([key, label, description]) => ({
+              title: `${pref(key) ? "✅" : "⬜"} ${label}`,
+              value: key,
+              description,
+            })),
+            { title: `🔄 ${p.status.refresh}`, value: "refresh" as const },
+          ],
+          actions: [
+            {
+              bind: "r",
+              title: p.status.refresh,
+              selection: "none",
+              onTrigger: refreshAll,
+            },
+          ],
+        })
+        if (!selected) return
+        if (selected === "refresh") {
+          refreshAll()
+          continue
+        }
+        togglePref(selected)
+      } catch {
+        return
+      }
+    }
+  }
+
+  async function showQuota() {
+    const p = pack()
+    await Promise.allSettled([refreshQuota(true), refreshMonthStats(true), refreshStats(true)])
+    const lines: string[] = []
+    const q = quota()
+    if (q.deepseek) lines.push(`${q.deepseek.short}\n  ${q.deepseek.detail}`)
+    if (q.zhipuFive) lines.push(`${q.zhipuFive.short}\n  ${q.zhipuFive.detail}`)
+    if (q.zhipuWeek) lines.push(`${q.zhipuWeek.short}\n  ${q.zhipuWeek.detail}`)
+    if (!q.deepseek && !q.zhipuFive && !q.zhipuWeek) lines.push(p.status.noQuota)
+
+    const today = todayStats()
+    if (today) {
+      lines.push(
+        `\n${p.status.today}: ${formatCost(today.cost)} · ${formatTokens(today.tokens)} tok · ${today.prompts} prompts`,
+      )
+      const dsCost = providerCost(today, /deepseek/i)
+      const glmCost = providerCost(today, /zhipu|zai|bigmodel/i)
+      if (dsCost || glmCost) lines.push(`  DeepSeek ${formatCost(dsCost)} · GLM ${formatCost(glmCost)}`)
+    }
+    const month = monthStats()
+    if (month) {
+      lines.push(`${p.status.quota} ${new Date().getMonth() + 1}月: ${formatCost(month.cost)} · ${formatTokens(month.tokens)} tok`)
+    }
+    const ctx = contextInfo()
+    if (ctx) {
+      lines.push(
+        `\n${p.status.context}: ${formatPercent(ctx.percent)} · ${formatTokens(ctx.tokens)}${ctx.limit ? ` / ${formatTokens(ctx.limit)}` : ""}${ctx.model ? ` · ${ctx.model}` : ""}`,
+      )
+    }
+    const usage = sessionUsage()
+    if (usage) lines.push(`${p.status.session}: ${formatCost(usage.cost)} · ${formatTokens(usage.tokens)} tok`)
+    const repository = git()
+    if (repository) {
+      lines.push(
+        `${p.status.git}: ${repository.branch ?? "?"} · ${repository.files} files · +${repository.additions} -${repository.deletions}`,
+      )
+    }
+    if (q.at) lines.push(`\nquota ${ageText(q.at)} ago`)
+    try {
+      await context.ui.dialog.alert({ title: p.status.quotaTitle, message: lines.join("\n") })
+    } catch {
+      /* dialog unavailable */
+    }
+  }
+
+  // Hydrate the usage data the moment a sidebar/footer tracks a session. The
+  // message sync is essential: the data layer only keeps the latest page, and
+  // without it a fresh tab has no assistant usage to derive context from.
+  const syncedModels = new Set<string>()
+  createEffect(() => {
+    const id = activeSession()
+    if (!id) return
+    try {
+      const session = data.session.get(id)
+      if (!session) return
+      void data.session.message.sync(id).catch(() => undefined)
+      const location = (session as any).location
+      const key = JSON.stringify(location ?? null)
+      if (!syncedModels.has(key)) {
+        syncedModels.add(key)
+        try {
+          const pending = (data.location as any).model?.sync?.(location)
+          if (pending && typeof pending.catch === "function") void pending.catch(() => undefined)
+        } catch {
+          /* model limits unavailable */
+        }
+      }
+      setGit(undefined)
+    } catch {
+      /* best effort */
+    }
+    void refreshGit(true)
+    void refreshStats()
   })
 
   // ---- friendly item builders (icon + localized label, raw text in detail) ----
@@ -809,7 +1479,8 @@ function createTaskStore(context: Plugin.Context) {
       if (previous) {
         const alive = new Set(list.map((session) => session.id))
         for (const session of previous) {
-          if (!alive.has(session.id)) remember(agentItem(session, pack()))
+          if (alive.has(session.id) || jobChildHistory.has(session.id)) continue
+          remember(agentItem(session, pack()))
         }
       }
     }),
@@ -894,6 +1565,23 @@ function createTaskStore(context: Plugin.Context) {
     }),
   )
 
+  // Background jobs are polled: the experimental job list is the only source
+  // that still reports completed-but-unconsumed subagents (issue #1). Stats,
+  // provider quota, and working-tree data are independent and cheap enough to
+  // poll on their own cadence.
+  void syncJobs()
+  void refreshStats()
+  void refreshQuota()
+  void refreshGit()
+  const jobTimer = setInterval(() => void syncJobs(), JOB_POLL_MS)
+  const statsTimer = setInterval(() => void refreshStats(), STATS_POLL_MS)
+  const quotaTimer = setInterval(() => void refreshQuota(), QUOTA_TTL_MS)
+  const gitTimer = setInterval(() => void refreshGit(), GIT_POLL_MS)
+  jobTimer.unref?.()
+  statsTimer.unref?.()
+  quotaTimer.unref?.()
+  gitTimer.unref?.()
+
   const running = createMemo<TaskItem[]>(() => {
     const p = pack()
     const current = activeRoot()
@@ -901,6 +1589,7 @@ function createTaskStore(context: Plugin.Context) {
       ...roots().map((session) => stable(rootItem(session, p, session.id === current))),
       ...shells().map((shell) => stable(shellItem(shell, p))),
       ...agents().map((session) => stable(agentItem(session, p))),
+      ...activeJobs().map((item) => stable(item)),
       ...terminals().map((pty) => stable(terminalItem(pty, p))),
     ]
   })
@@ -920,7 +1609,33 @@ function createTaskStore(context: Plugin.Context) {
     ),
   )
 
-  return { running, stale, total, grandTotal, track, lang, pack }
+  return {
+    running,
+    stale,
+    total,
+    grandTotal,
+    track,
+    lang,
+    pack,
+    unacked,
+    unackedCount,
+    ackJob,
+    ackAll,
+    openJob,
+    showCompleted,
+    showSettings,
+    showQuota,
+    refreshAll,
+    status: {
+      pref,
+      contextInfo,
+      sessionUsage,
+      todayStats,
+      monthStats,
+      git,
+      quota,
+    },
+  }
 }
 
 function TaskRow(props: { item: TaskItem; theme: Plugin.Context["theme"]; pack: Pack; done?: boolean }) {
@@ -945,20 +1660,129 @@ function TaskRow(props: { item: TaskItem; theme: Plugin.Context["theme"]; pack: 
   )
 }
 
+function StatusCard(props: { context: Plugin.Context; tasks: ReturnType<typeof getStore> }) {
+  const p = () => props.tasks.pack()
+  const theme = props.context.theme
+  const s = props.tasks.status
+  const warning = theme.text.feedback?.warning?.base ?? theme.text.base
+  const danger = theme.text.feedback?.error?.base ?? theme.text.base
+  const percentColor = (percent: number | undefined) => {
+    if (percent !== undefined && percent >= 95) return danger
+    if (percent !== undefined && percent >= 80) return warning
+    return theme.text.base
+  }
+  const contextText = () => {
+    const ctx = s.contextInfo()
+    if (!ctx) return "—"
+    const tokens = `${formatTokens(ctx.tokens)}${ctx.limit ? ` / ${formatTokens(ctx.limit)}` : ""}`
+    return `${ctx.percent !== undefined ? `${formatPercent(ctx.percent)} · ` : ""}${tokens}`
+  }
+  const sessionText = () => {
+    const usage = s.sessionUsage()
+    if (!usage) return "—"
+    const agents = usage.subagents > 0 ? ` · ${usage.subagents}🤖` : ""
+    return `${formatCost(usage.cost)} · ${formatTokens(usage.tokens)} tok${agents}`
+  }
+  const todayText = () => {
+    const today = s.todayStats()
+    if (!today) return "—"
+    return `${formatCost(today.cost)} · ${formatTokens(today.tokens)} tok`
+  }
+  const showQuota = () => {
+    const q = s.quota()
+    return Boolean(q.deepseek || q.zhipuFive || q.zhipuWeek)
+  }
+  return (
+    <box>
+      <text fg={theme.text.base}>
+        <b>{p().status.header}</b>
+      </text>
+      <Show when={s.pref("context")}>
+        <text>
+          <span style={{ fg: theme.text.muted }}>{`🧠 ${p().status.context}  `}</span>
+          <span style={{ fg: percentColor(s.contextInfo()?.percent) }}>{contextText()}</span>
+        </text>
+      </Show>
+      <Show when={s.pref("session")}>
+        <text>
+          <span style={{ fg: theme.text.muted }}>{`💬 ${p().status.session}  `}</span>
+          <span style={{ fg: theme.text.base }}>{sessionText()}</span>
+        </text>
+      </Show>
+      <Show when={s.pref("today")}>
+        <text>
+          <span style={{ fg: theme.text.muted }}>{`📅 ${p().status.today}  `}</span>
+          <span style={{ fg: theme.text.base }}>{todayText()}</span>
+        </text>
+      </Show>
+      <Show when={s.pref("quota") && showQuota()}>
+        <Show when={s.quota().deepseek}>
+          <text>
+            <span style={{ fg: theme.text.muted }}>{`${p().status.quota}  `}</span>
+            <span style={{ fg: percentColor(s.quota().deepseek?.low ? 100 : undefined) }}>
+              {s.quota().deepseek?.short}
+            </span>
+          </text>
+        </Show>
+        <Show when={s.quota().zhipuFive}>
+          <text>
+            <span style={{ fg: theme.text.muted }}>{`${p().status.quota}  `}</span>
+            <span style={{ fg: percentColor(s.quota().zhipuFive?.percent) }}>
+              {s.quota().zhipuFive?.short}
+              {s.quota().zhipuWeek ? ` · ${s.quota().zhipuWeek?.short}` : ""}
+            </span>
+          </text>
+        </Show>
+      </Show>
+      <Show when={s.pref("git") && (s.git()?.branch || (s.git()?.files ?? 0) > 0)}>
+        <text>
+          <span style={{ fg: theme.text.muted }}>{`⎇ ${p().status.git}  `}</span>
+          <span style={{ fg: theme.text.base }}>
+            {s.git()?.branch ?? "?"}
+            {s.git()?.files ? ` ±${s.git()?.files} +${s.git()?.additions} -${s.git()?.deletions}` : " ✓"}
+          </span>
+        </text>
+      </Show>
+    </box>
+  )
+}
+
+function UnackedRow(props: { item: UnackedJob; tasks: ReturnType<typeof getStore>; theme: Plugin.Context["theme"] }) {
+  const warning = props.theme.text.feedback?.warning?.base ?? props.theme.text.base
+  return (
+    <box onMouseDown={() => props.tasks.openJob(props.item)}>
+      <text fg={warning}>
+        {jobIcon(props.item.status)} {props.item.label}
+      </text>
+    </box>
+  )
+}
+
 export function Taskbar(props: { context: Plugin.Context; sessionID?: string }) {
   probe(`taskbar body sessionID=${props.sessionID}`)
+  const warning = props.context.theme.text.feedback?.warning?.base ?? props.context.theme.text.base
   const tasks = getStore(props.context)
   // Reactive on purpose: works whether the host re-creates this component on
   // input change (current behavior) or only updates props (Solid convention).
   createEffect(() => tasks.track(props.sessionID))
+  const idle = () => tasks.grandTotal() === 0 && tasks.unackedCount() === 0
   return (
     <box>
+      <StatusCard context={props.context} tasks={tasks} />
       <text fg={tasks.grandTotal() > 0 ? props.context.theme.text.base : props.context.theme.text.muted}>
         <b>{tasks.pack().header}</b>
-        <Show when={tasks.grandTotal() === 0}>
+        <Show when={idle()}>
           <span style={{ fg: props.context.theme.text.muted }}>{` ${tasks.pack().idle}`}</span>
         </Show>
       </text>
+      <Show when={tasks.unackedCount() > 0}>
+        <text fg={warning}>
+          <b>{tasks.pack().status.unacked(tasks.unackedCount())}</b>
+        </text>
+        <For each={tasks.unacked()}>
+          {(item) => <UnackedRow item={item} tasks={tasks} theme={props.context.theme} />}
+        </For>
+      </Show>
       <For each={tasks.running()}>{(item) => <TaskRow item={item} theme={props.context.theme} pack={tasks.pack()} />}</For>
       <For each={tasks.stale()}>{(item) => <TaskRow item={item} theme={props.context.theme} pack={tasks.pack()} done />}</For>
     </box>
@@ -974,12 +1798,23 @@ export function FooterBadge(props: { context: Plugin.Context; sessionID?: string
   createEffect(() => tasks.track(props.sessionID))
   const label = () => {
     const p = tasks.pack()
+    const parts: string[] = []
     // Dim rows (the current tab's own busy session) are foreground work the
     // user is watching — the footer badge counts background work only.
     const runningCount = tasks.running().filter((item) => !item.dim).length
     const doneCount = tasks.stale().length
-    if (runningCount === 0) return doneCount > 0 ? p.footer.doneOnly(doneCount) : undefined
-    return p.footer.tasks(runningCount, doneCount)
+    if (tasks.unackedCount() > 0) parts.push(`🎫${tasks.unackedCount()}`)
+    if (runningCount > 0) parts.push(p.footer.tasks(runningCount, doneCount))
+    else if (doneCount > 0) parts.push(p.footer.doneOnly(doneCount))
+    // The footer is the collapsed-sidebar fallback; keep it to the one number
+    // that matters at a glance. The built-in prompt footer already shows
+    // context %, so only a low quota warning is added here.
+    if (tasks.status.pref("footer")) {
+      const q = tasks.status.quota()
+      if (q.deepseek?.low) parts.push(q.deepseek.short)
+      else if (q.zhipuFive?.low) parts.push(`⚡${Math.round(q.zhipuFive.percent ?? 0)}%`)
+    }
+    return parts.length > 0 ? parts.join(" · ") : undefined
   }
   return (
     <Show when={label() !== undefined}>
@@ -995,6 +1830,42 @@ export default Plugin.define({
     // Warm up tracking immediately: the store starts accumulating the
     // completed trail from plugin load, before any badge mounts.
     getStore(context)
+    context.keymap.layer(() => ({
+      commands: [
+        {
+          id: "oc-taskbar.statusline",
+          title: "Statusline settings",
+          description: "Toggle the usage metrics shown in the sidebar and footer",
+          group: "oc-taskbar",
+          slash: { name: "statusline" },
+          run: () => {
+            void getStore(context).showSettings()
+          },
+        },
+        {
+          id: "oc-taskbar.quota",
+          title: "Usage and quota details",
+          description: "Show session context, daily/monthly usage, and provider quota",
+          group: "oc-taskbar",
+          slash: { name: "quota" },
+          run: () => {
+            void getStore(context).showQuota()
+          },
+        },
+        {
+          id: "oc-taskbar.completed",
+          title: "Unacknowledged background jobs",
+          description: "Review completed background subagents; append 'all' to mark every item read",
+          group: "oc-taskbar",
+          slash: { name: "completed", arguments: true },
+          run: (input) => {
+            const tasks = getStore(context)
+            if (input?.trim().toLowerCase() === "all") tasks.ackAll()
+            else void tasks.showCompleted()
+          },
+        },
+      ],
+    }))
     context.ui.slot({
       append: "sidebar.content",
       render: (props) => <Taskbar context={context} sessionID={props.sessionID} />,
