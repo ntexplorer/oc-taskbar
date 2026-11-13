@@ -41,7 +41,7 @@ V1 时代底部 spinner 转 = 有任务在跑，停 = 全部结束，看一眼�
 - `配额`：DeepSeek 余额（CNY）与 GLM Coding Plan 5 小时 / 周窗口百分比
 - `⎇ Git`：当前分支、工作区改动文件数、增删行数
 
-凭证优先取 OpenCode V2 credential store 中 active 的 provider key，缺失时回退环境变量：DeepSeek `DEEPSEEK_API_KEY`；智谱 `ZAI_API_KEY` / `BIGMODEL_API_KEY` / `ZHIPU_API_KEY` / `ZHIPUAI_API_KEY` / `GLM_API_KEY`。密钥只在内存中用于请求，不写日志。配额请求 8 秒超时、5 分钟缓存，单 provider 失败保留上一次好值。DeepSeek 端点 `https://api.deepseek.com/user/balance`；智谱端点 `https://open.bigmodel.cn/api/monitor/usage/quota/limit`（区域 key 需匹配；z.ai 全局站可另配）。
+凭证优先取 OpenCode V2 credential store 中 active 的 provider key，缺失时回退环境变量：DeepSeek `DEEPSEEK_API_KEY`；智谱 `ZAI_API_KEY` / `BIGMODEL_API_KEY` / `ZHIPU_API_KEY` / `ZHIPUAI_API_KEY` / `GLM_API_KEY`。密钥只在内存中用于请求，不写日志。配额请求 8 秒超时、5 分钟缓存，单 provider 失败保留上一次好值。DeepSeek 端点 `https://api.deepseek.com/user/balance`；智谱端点 `https://open.bigmodel.cn/api/monitor/usage/quota/limit`（当前适配 BigModel CN，z.ai 全局站未适配）。
 
 `/quota` 打开详情对话框：额度明细、今日/本月汇总、当前 Context、会话与 git 状态，并强制刷新一次。
 
