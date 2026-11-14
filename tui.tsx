@@ -52,6 +52,10 @@ const RESYNC_MS = 60_000
 // still shows a completed-but-unconsumed job after a platform wakeup loss
 // (issue #1); keep it independent from the session diff channel.
 const JOB_POLL_MS = 10_000
+// How long a child seen in the job channel is protected from the session-diff
+// completion path. Bounded so a direct follow-up in that child tab later is
+// treated as ordinary foreground work again.
+const JOB_HISTORY_MS = 5 * 60_000
 
 // Today's token/cost aggregate (one SQLite rollup on the server).
 const STATS_POLL_MS = 60_000
@@ -474,7 +478,7 @@ type TaskItem = {
   readonly dim?: boolean
 }
 
-type CompletedItem = TaskItem & { readonly at: number }
+type CompletedItem = TaskItem & { readonly at: number; readonly silent?: boolean }
 
 type JobStatus = "running" | "completed" | "error" | "cancelled"
 
@@ -495,6 +499,7 @@ type JobInfo = {
 
 type UnackedJob = {
   readonly key: string
+  readonly gen?: string
   readonly id: string
   readonly childSessionID?: string
   readonly parentSessionID?: string
@@ -524,6 +529,13 @@ const STATUS_DEFAULTS: StatusPrefs = {
 
 const jobKey = (job: JobInfo): string =>
   `${job.id}:${job.time?.completed ?? job.time?.started ?? 0}`
+
+// One background job id may host several generations (a child that reports to its
+// parent and is resumed later). Notifications and the ledger dedupe across the
+// "completed row seen" and "running row vanished" paths by generation, not by
+// completion timestamp: both paths can observe the same generation minutes apart.
+const jobGenKey = (job: JobInfo): string =>
+  `${job.childSessionID ?? job.id}:${job.time?.started ?? 0}`
 
 const jobLabel = (job: JobInfo, fallback: string): string => {
   const raw = cleanTitle(job.description ?? job.title ?? "")
@@ -833,14 +845,26 @@ function createTaskStore(context: Plugin.Context) {
 
   // ---- background subagent jobs (issue #1) ----
   // Kept separate from the reactive session list: a background job can finish
-  // while the TUI is disconnected or before its child session is loaded, and
-  // the job API still returns the completed-but-unconsumed row. Foreground
-  // subagents remain covered by the session diffs below.
+  // while the TUI is disconnected or before its child session is loaded. On
+  // 2.3.0 the normal completion is detected by a running generation vanishing
+  // (the host deletes the durable row when the report is admitted); a completed
+  // row that survives is a delivery-stuck report. Foreground subagents remain
+  // covered by the session diffs below.
   const [jobs, setJobs] = createSignal<JobInfo[]>([])
-  const jobChildren = createMemo(() => new Set(jobs().flatMap((job) => (job.childSessionID ? [job.childSessionID] : []))))
-  // Child sessions already covered by the job channel must not be announced a
-  // second time by the session-list diff below.
-  const jobChildHistory = new Set<string>()
+  // Only running jobs need display dedupe: a completed-but-undelivered row must
+  // not hide a direct follow-up typed into that child tab.
+  const jobChildren = createMemo(
+    () =>
+      new Set(
+        jobs()
+          .filter((job) => job.status === "running")
+          .flatMap((job) => (job.childSessionID ? [job.childSessionID] : [])),
+      ),
+  )
+  // Child sessions recently covered by the job channel must not be announced a
+  // second time by the session-list diff below. Time-bounded, so a direct
+  // follow-up typed into that child tab later is ordinary foreground work.
+  const jobChildHistory = new Map<string, number>()
 
   // ---- running subagents: child sessions whose runner is active ----
   let lastAgents: SessionList = []
@@ -976,11 +1000,15 @@ function createTaskStore(context: Plugin.Context) {
   }
   const addUnacked = (job: JobInfo) => {
     const key = jobKey(job)
+    const gen = jobGenKey(job)
     if (unackedState().acked[key]) return
-    if (unacked().some((item) => item.key === key)) return
+    // The same generation can be observed through both completion paths; dedupe
+    // by generation because their ledger keys use different timestamps.
+    if (unacked().some((item) => item.key === key || item.gen === gen)) return
     const fallback = `${pack().agent} ${short(job.childSessionID ?? job.id)}`
     const item: UnackedJob = {
       key,
+      gen,
       id: String(job.id),
       childSessionID: job.childSessionID,
       parentSessionID: job.sessionID,
@@ -1141,27 +1169,34 @@ function createTaskStore(context: Plugin.Context) {
     }
   }
 
-  const activeJobs = createMemo<TaskItem[]>(() => {
+  // One item builder for the running row and the completed trail, so a background
+  // generation never shows up twice under two different ids.
+  const jobTaskItem = (job: JobInfo): TaskItem => {
     const p = pack()
-    return jobs()
+    const desc = describeAgent(job.description ?? job.title, `${p.agent} ${short(job.childSessionID ?? job.id)}`)
+    return {
+      kind: "agent" as const,
+      id: job.childSessionID ?? `job:${job.id}`,
+      icon: desc.icon,
+      label: desc.label,
+      detail: job.childSessionID,
+    }
+  }
+
+  const activeJobs = createMemo<TaskItem[]>(() =>
+    jobs()
       .filter((job) => job.status === "running")
-      .map((job) => {
-        const desc = describeAgent(job.description ?? job.title, `${p.agent} ${short(job.childSessionID ?? job.id)}`)
-        return {
-          kind: "agent" as const,
-          id: `job:${job.id}`,
-          icon: desc.icon,
-          label: desc.label,
-          detail: job.childSessionID,
-        }
-      })
-  })
+      .map((job) => jobTaskItem(job)),
+  )
 
   const notifiedJobs = new Set<string>()
   function notifyJob(job: JobInfo) {
-    const key = jobKey(job)
+    const key = jobGenKey(job)
     if (notifiedJobs.has(key)) return
     notifiedJobs.add(key)
+    if (notifiedJobs.size > 500) {
+      for (const old of [...notifiedJobs].slice(0, 200)) notifiedJobs.delete(old)
+    }
     if (!notifyEnabled()) return
     const p = pack()
     const label = jobLabel(job, `${p.agent} ${short(job.childSessionID ?? job.id)}`)
@@ -1179,9 +1214,28 @@ function createTaskStore(context: Plugin.Context) {
     }
   }
 
+  // Both completion paths (a completed row seen, a running row vanished) settle a
+  // generation at most once. On 2.3.0 the report is admitted into the parent inbox
+  // and the durable row deleted within milliseconds, so "running vanished" is the
+  // normal signal; a completed row only survives when delivery is stuck.
+  const settledGens = new Set<string>()
+  function settleJob(job: JobInfo) {
+    const gen = jobGenKey(job)
+    if (settledGens.has(gen)) return
+    settledGens.add(gen)
+    if (settledGens.size > 500) {
+      for (const key of [...settledGens].slice(0, 200)) settledGens.delete(key)
+    }
+    // silent: this channel sends the forced notification itself; the trail entry
+    // must not ring a second time through the generic completed effect.
+    remember(jobTaskItem(job), true)
+    notifyJob(job)
+    probe(`job settle ${gen}`)
+  }
+
   let jobReq = 0
   let jobsPrimed = false
-  let lastJobs = new Map<string, JobInfo>()
+  let lastJobs: JobInfo[] = []
   async function syncJobs() {
     const req = ++jobReq
     try {
@@ -1189,19 +1243,39 @@ function createTaskStore(context: Plugin.Context) {
       if (req !== jobReq) return
       const list: JobInfo[] = Array.isArray(raw) ? raw : []
       const previous = lastJobs
-      lastJobs = new Map(list.map((job) => [String(job.id), job]))
-      for (const job of list) if (job.childSessionID) jobChildHistory.add(job.childSessionID)
+      // One session id can carry several generations (old completed row still
+      // undelivered + a resumed running entry), so key snapshots by generation.
+      const previousByGen = new Map(previous.map((job) => [jobGenKey(job), job]))
+      const currentByGen = new Map(list.map((job) => [jobGenKey(job), job]))
+      lastJobs = list
+      const historyAt = Date.now()
+      for (const job of list) if (job.childSessionID) jobChildHistory.set(job.childSessionID, historyAt)
       if (jobChildHistory.size > 500) {
-        for (const id of [...jobChildHistory].slice(0, 200)) jobChildHistory.delete(id)
+        for (const [id, at] of jobChildHistory) if (historyAt - at >= JOB_HISTORY_MS) jobChildHistory.delete(id)
+        for (const id of [...jobChildHistory.keys()].slice(0, 200)) jobChildHistory.delete(id)
       }
       setJobs(list)
       const primed = jobsPrimed
+      // 2.3.0 background subagents report to the parent as soon as they idle and the
+      // host deletes the durable row right after admission. Detect that normal
+      // completion by diffing running generations: an entry that was running and is
+      // absent from the current snapshot (or replaced by a newer generation) ended.
+      if (primed) {
+        for (const [gen, old] of previousByGen) {
+          if (old.status !== "running" || currentByGen.has(gen)) continue
+          settleJob(old)
+        }
+      }
       for (const job of list) {
         if (job.status === "running") continue
+        // Completed-but-unconsumed rows are delivery-stuck reports: keep them in
+        // the durable ledger until the user acknowledges them.
         addUnacked(job)
-        const old = previous.get(String(job.id))
+        const gen = jobGenKey(job)
+        const wasRunning = previousByGen.get(gen)?.status === "running"
+        const known = previousByGen.has(gen)
         const recent = (job.time?.completed ?? 0) > Date.now() - 5 * 60_000
-        if (primed && (old?.status === "running" || (!old && recent))) notifyJob(job)
+        if (primed && (wasRunning || (!known && recent))) settleJob(job)
       }
       jobsPrimed = true
       probe(`jobs ${list.length} running=${list.filter((job) => job.status === "running").length}`)
@@ -1421,11 +1495,20 @@ function createTaskStore(context: Plugin.Context) {
   // ---- completed trail: remember labels before they vanish from the reactive lists ----
   const [completed, setCompleted] = createSignal<CompletedItem[]>([])
   const labelCache = new Map<string, TaskItem>()
-  const remember = (item: TaskItem) => {
-    setCompleted((list) => [...list.filter((entry) => entry.id !== item.id), { ...item, at: Date.now() }])
+  const remember = (item: TaskItem, silent = false) => {
+    const at = Date.now()
+    setCompleted((list) => [
+      ...list.filter((entry) => entry.id !== item.id),
+      { ...item, at, ...(silent ? { silent: true } : {}) },
+    ])
+    // A resumed child can settle again within the retention window; the later
+    // trail must not be removed early by this generation's timer.
     setTimeout(() => {
-      setCompleted((list) => list.filter((entry) => entry.id !== item.id))
-      labelCache.delete(item.id)
+      setCompleted((list) => {
+        const next = list.filter((entry) => !(entry.id === item.id && entry.at === at))
+        if (!next.some((entry) => entry.id === item.id)) labelCache.delete(item.id)
+        return next
+      })
     }, RETAIN_MS + 1_000)
   }
 
@@ -1479,7 +1562,8 @@ function createTaskStore(context: Plugin.Context) {
       if (previous) {
         const alive = new Set(list.map((session) => session.id))
         for (const session of previous) {
-          if (alive.has(session.id) || jobChildHistory.has(session.id)) continue
+          const coveredAt = jobChildHistory.get(session.id)
+          if (alive.has(session.id) || (coveredAt !== undefined && Date.now() - coveredAt < JOB_HISTORY_MS)) continue
           remember(agentItem(session, pack()))
         }
       }
@@ -1545,6 +1629,7 @@ function createTaskStore(context: Plugin.Context) {
       if (!notifyEnabled()) return
       const fresh = previous === undefined ? [] : list.filter((entry) => !previous.some((old) => entry.id === old.id))
       for (const entry of fresh) {
+        if (entry.silent) continue
         const key = `${entry.id}:${entry.at}`
         if (notified.has(key)) continue
         if (entry.kind === "root" && !notifyRootEnabled()) continue
@@ -1565,8 +1650,9 @@ function createTaskStore(context: Plugin.Context) {
     }),
   )
 
-  // Background jobs are polled: the experimental job list is the only source
-  // that still reports completed-but-unconsumed subagents (issue #1). Stats,
+  // Background jobs are polled: on 2.2.x the experimental job list reports
+  // completed-but-unconsumed subagents (issue #1); on 2.3.0 it also carries live
+  // background jobs, so diffing running generations detects normal completions. Stats,
   // provider quota, and working-tree data are independent and cheap enough to
   // poll on their own cadence.
   void syncJobs()
@@ -1594,7 +1680,12 @@ function createTaskStore(context: Plugin.Context) {
     ]
   })
 
-  const stale = createMemo(() => completed().filter((entry) => Date.now() - entry.at <= RETAIN_MS))
+  // A resumed child can be running again while its previous generation's trail is
+  // still fresh; keep only one row per entity id on screen.
+  const stale = createMemo(() => {
+    const active = new Set(running().map((item) => item.id))
+    return completed().filter((entry) => Date.now() - entry.at <= RETAIN_MS && !active.has(entry.id))
+  })
   const total = createMemo(() => running().length)
   const grandTotal = createMemo(() => running().length + stale().length)
 
