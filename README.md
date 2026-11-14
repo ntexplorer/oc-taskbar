@@ -22,7 +22,8 @@ V1 时代底部 spinner 转 = 有任务在跑，停 = 全部结束，看一眼�
 - [x] v1.3.0（2026-11-06）：修复「shell 运行中但侧栏无任务」——根因是宿主按 location 分桶存 shell，插件只读默认桶；改为插件自管原始事件 + location 注册表 + 逐桶对账（详见 AGENTS.md 事实 16）
 - [x] v1.4.0（2026-11-14）：Issue #1 修复——引入实验性 background job 通道，完成但未被父会话消费的子代理在本地持久账本保留到显式确认，并额外发系统通知；新增用量状态栏（Context / 会话 / 今日 / DeepSeek 余额 / GLM 套餐窗口 / git 工作区）与 `/statusline`、`/quota`、`/completed` 命令
 - [x] v1.5.0（2026-11-14）：适配 opencode 2.3.0 的「子代理默认后台」——上游在子代理空闲时立即投递报告并删除持久 job 行，插件改用「运行代际消失」检测正常完成（✅ 残影 + 一次通知），`🎫 未确认` 收窄为「报告投递卡住」的持久收件箱；内置 Context 卡关闭项迁移到 TUI 配置 `cli.json`
-- [ ] v1.5.0 验收：见 AGENTS.md「接续指引」的验收清单（2.3.0 子代理完成、🎫 卡住报告、跨 location shell、断连重连、切 tab、用量卡）
+- [x] v1.5.1（2026-11-14）：命令 keymap 层改为 `mode: "global"`——2.3.0 的斜杠自动补全打开时会压入 `autocomplete` 模式，非 global 层被过滤，导致 `/quota`、`/statusline`、`/completed` 显示「No matching commands」
+- [ ] v1.5.1 验收：见 AGENTS.md「接续指引」的验收清单（2.3.0 子代理完成、🎫 卡住报告、斜杠命令、跨 location shell、断连重连、切 tab、用量卡）
 
 ## 使用
 

@@ -1922,6 +1922,10 @@ export default Plugin.define({
     // completed trail from plugin load, before any badge mounts.
     getStore(context)
     context.keymap.layer(() => ({
+      // The slash autocomplete pushes its own keymap mode while open, and
+      // non-global layers become unreachable in that mode (2.3.0), which hides
+      // plugin slash commands exactly when the menu needs them.
+      mode: "global",
       commands: [
         {
           id: "oc-taskbar.statusline",
@@ -1957,6 +1961,21 @@ export default Plugin.define({
         },
       ],
     }))
+    // Slash commands are host keymap entries; probe them once so a version
+    // change that drops plugin commands is visible in the startup log.
+    setTimeout(() => {
+      const keymap = context.keymap as any
+      const pop = keymap.mode?.push?.("autocomplete")
+      try {
+        const list = keymap.commands?.() as Array<any>
+        const ours = (list ?? []).filter((command) => String(command.id).startsWith("oc-taskbar."))
+        probe(`commands ${ours.map((command) => command.slash?.name ?? command.id).join(",") || "none"}`)
+      } catch (error) {
+        probe(`commands fail ${String(error)}`)
+      } finally {
+        pop?.()
+      }
+    }, 2_000)
     context.ui.slot({
       append: "sidebar.content",
       render: (props) => <Taskbar context={context} sessionID={props.sessionID} />,
