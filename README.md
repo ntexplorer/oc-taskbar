@@ -23,7 +23,8 @@ V1 时代底部 spinner 转 = 有任务在跑，停 = 全部结束，看一眼�
 - [x] v1.4.0（2026-11-14）：Issue #1 修复——引入实验性 background job 通道，完成但未被父会话消费的子代理在本地持久账本保留到显式确认，并额外发系统通知；新增用量状态栏（Context / 会话 / 今日 / DeepSeek 余额 / GLM 套餐窗口 / git 工作区）与 `/statusline`、`/quota`、`/completed` 命令
 - [x] v1.5.0（2026-11-14）：适配 opencode 2.3.0 的「子代理默认后台」——上游在子代理空闲时立即投递报告并删除持久 job 行，插件改用「运行代际消失」检测正常完成（✅ 残影 + 一次通知），`🎫 未确认` 收窄为「报告投递卡住」的持久收件箱；内置 Context 卡关闭项迁移到 TUI 配置 `cli.json`
 - [x] v1.5.1（2026-11-14）：命令 keymap 层改为 `mode: "global"`——2.3.0 的斜杠自动补全打开时会压入 `autocomplete` 模式，非 global 层被过滤，导致 `/quota`、`/statusline`、`/completed` 显示「No matching commands」
-- [ ] v1.5.1 验收：见 AGENTS.md「接续指引」的验收清单（2.3.0 子代理完成、🎫 卡住报告、斜杠命令、跨 location shell、断连重连、切 tab、用量卡）
+- [x] v1.6.0（2026-11-14）：通知降噪——聚焦时只留残影/徽标，失焦才弹，2 秒内合并为一条；子代理完成不再重复发声（内置通知已覆盖），shell/terminal 每波一声；新增热重载活跃实例守卫。金额显示改为中文默认人民币（`≈¥`，实时 USD/CNY 汇率，6 小时刷新，失败回退缓存/7.2，`OC_TASKBAR_USD_CNY` 可覆盖），`/quota` 同时保留 USD 原值
+- [ ] v1.6.0 验收：见 AGENTS.md「接续指引」的验收清单（2.3.0 子代理完成、🎫 卡住报告、斜杠命令、通知降噪、人民币显示、跨 location shell、断连重连、切 tab）
 
 ## 使用
 
@@ -31,7 +32,7 @@ V1 时代底部 spinner 转 = 有任务在跑，停 = 全部结束，看一眼�
 
 侧边栏 **📋 后台任务** 区块：每条任务显示为「emoji + 一句人话」——在跑 shell 按命令模式归类（`🧪 运行测试`、`🔨 构建项目`、`📦 安装依赖`、`📂 复制 · <文件名>`、`📖 查看变更`……不认识的命令显示 `💻 运行 <命令>`），子代理显示其任务描述并配语义图标（🔍 探索 / 🔧 修复 / ✍️ 实现 / 🧐 审查……），终端显示 `🖥️ 终端`，根会话在跑时显示 `💬 + 会话标题`——**当前 tab 的行淡显、完成时不通知不留残影**，其他 tab 的行与其他任务同待遇（侧栏计数含淡显行；footer 徽标不计）。任务完成后变 `✅ … · 完成了` 残影保留 60 秒。**点击任意行可展开原始命令 / 完整标题**。切 tab 状态不丢（跟踪在模块级 store，组件只是视图）。
 
-**后台子代理完成（opencode 2.3.0+）**：子代理空闲时上游会立即把报告投递给父会话并删除持久 job 行；插件把「在跑的 job 代际消失」判定为一次完成，侧栏出现 `✅ … · 完成了` 残影 60 秒并发一次系统通知。`🎫 未确认 (N)` 只保留**报告投递卡住**（completed-but-unconsumed 行长期存在）的条目：本地 storage 持久保留（最多 20 条，重启 TUI 仍在），点击行直接跳到子会话查看报告；`/completed` 打开管理列表（`m` 确认、`o` 打开、`a` 全部确认），`/completed all` 一键清空。确认记录保留 30 天，同一 job 代际不会重复提醒。
+**后台子代理完成（opencode 2.3.0+）**：子代理空闲时上游会立即把报告投递给父会话并删除持久 job 行；插件把「在跑的 job 代际消失」判定为一次完成，侧栏出现 `✅ … · 完成了` 残影 60 秒；系统通知只在 TUI 失焦时弹，且 2 秒内的多个完成会合并成一条。`🎫 未确认 (N)` 只保留**报告投递卡住**（completed-but-unconsumed 行长期存在）的条目：本地 storage 持久保留（最多 20 条，重启 TUI 仍在），点击行直接跳到子会话查看报告；`/completed` 打开管理列表（`m` 确认、`o` 打开、`a` 全部确认），`/completed all` 一键清空。确认记录保留 30 天，同一 job 代际不会重复提醒。
 
 ### 用量区
 
@@ -42,10 +43,11 @@ V1 时代底部 spinner 转 = 有任务在跑，停 = 全部结束，看一眼�
 - `📅 今日`：`experimental.session.stats` 的当日汇总——本地 00:00 起、**本机全部项目/会话**（含子代理）的 token / 花费；每 60 秒刷新，跨午夜自动归零
 - `配额`：DeepSeek 余额（CNY）与 GLM Coding Plan 5 小时 / 周窗口百分比
 - `⎇ Git`：当前分支、工作区改动文件数、增删行数
+- 金额单位：中文界面默认人民币（`≈¥`），英文默认 USD；美元/人民币汇率在装载时联网获取、每 6 小时刷新（jsDelivr `@fawazahmed0/currency-api`），失败回退上次缓存，再回退 7.2；`OC_TASKBAR_USD_CNY` 可强制覆盖。`/quota` 里同时保留 `($…)` 原值并显示当前汇率与更新时间
 
 凭证优先取 OpenCode V2 credential store 中 active 的 provider key，缺失时回退环境变量：DeepSeek `DEEPSEEK_API_KEY`；智谱 `ZAI_API_KEY` / `BIGMODEL_API_KEY` / `ZHIPU_API_KEY` / `ZHIPUAI_API_KEY` / `GLM_API_KEY`。密钥只在内存中用于请求，不写日志。配额请求 8 秒超时、5 分钟缓存，单 provider 失败保留上一次好值。DeepSeek 端点 `https://api.deepseek.com/user/balance`；智谱端点 `https://open.bigmodel.cn/api/monitor/usage/quota/limit`（当前适配 BigModel CN，z.ai 全局站未适配）。
 
-`/quota` 打开详情对话框：额度明细、今日/本月汇总、当前 Context、会话与 git 状态，并强制刷新一次。
+`/quota` 打开详情对话框：额度明细、今日/本月汇总（人民币 + USD 原值）、当前汇率、当前 Context、会话与 git 状态，并强制刷新一次。
 
 ### Footer 兜底
 
@@ -53,7 +55,7 @@ V1 时代底部 spinner 转 = 有任务在跑，停 = 全部结束，看一眼�
 
 ### 通知
 
-任务完成时弹通知 + 声音（后台 job 通道强制 `notification: always`，与父会话自己处理报告相互独立；2.3.0 下报告投递卡住时尤其重要）。想关掉：`storage.store("notify", …)`；`💬` 根会话通道另有 `storage.store("notifyRoot", …)`，默认同样开。
+完成时只更新侧栏残影 + footer 徽标，**不打断你**。系统通知只在 TUI 失焦时弹，2 秒窗口内的多个完成合并成一条（如「✅ 3 个子代理完成了」）；聚焦时完全不弹气泡，避免宿主逐个排队导致的延迟。子代理/根会话的完成声音由内置 `opencode.notifications` 播放，本插件不再重复发声；shell/terminal 完成每波最多一声 `done`。想关掉：`storage.store("notify", …)`；`💬` 根会话通道另有 `storage.store("notifyRoot", …)`，默认同样开。
 
 ## 安装
 
@@ -75,7 +77,7 @@ robocopy D:\Coding\oc-taskbar "$env:USERPROFILE\.config\opencode\plugins\oc-task
 
 配置有热加载；若未生效，重启 TUI。`opencode.sidebar.context` 是内置 Context 卡的 id，`-` 前缀表示禁用（TUI 插件 provider 的配置语法）。插件无法通过公开 API 关闭其他内置插件，因此这是部署配置项而非插件行为；其他内置卡（MCP / Todo / SidebarFooter）不受影响。改动前建议备份配置。
 
-诊断开关：设 `OC_TASKBAR_PROBE=<文件路径>` 后，插件在徽标挂载、计数变化、用量刷新时向该文件追加一行（默认零 IO）。相关 probe 行：`jobs N running=M`（background job 轮询）、`job settle <子会话:开始时间>`（检测到一次完成）、`job ack <key>`、`notify job <key> ok=… skipped=…`、`stats today/month`、`quota ds=ok glm=ok`、`git files=N`、`pref <key>=…`；shell 通道仍为 `location + <桶键>`、`bucket <桶键> -> N running`、`resync all (server.connected)`。无 tty 时 OpenTUI 不挂载侧边栏，侧栏卡的验收需在真实终端进行；footer 可无头探针看到 `footer body`。
+诊断开关：设 `OC_TASKBAR_PROBE=<文件路径>` 后，插件在徽标挂载、计数变化、用量刷新时向该文件追加一行（默认零 IO）。相关 probe 行：`store create #N`（热重载代数，只有最新实例会通知）、`jobs N running=M`（background job 轮询）、`job settle <子会话:开始时间>`（检测到一次完成）、`job ack <key>`、`notify send n=… ok=… skipped=…`（合并后的通知）、`fx live <rate>` / `fx fail …`（汇率）、`stats today/month`、`quota ds=ok glm=ok`、`git files=N`、`pref <key>=…`；shell 通道仍为 `location + <桶键>`、`bucket <桶键> -> N running`、`resync all (server.connected)`。无 tty 时 OpenTUI 不挂载侧边栏，侧栏卡的验收需在真实终端进行；footer 可无头探针看到 `footer body`。
 
 ## 开发
 

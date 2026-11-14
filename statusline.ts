@@ -101,6 +101,33 @@ export function formatCost(value: number): string {
   return `$${Math.round(n)}`
 }
 
+export type CurrencyMode = "auto" | "CNY" | "USD"
+export type Currency = "CNY" | "USD"
+
+// Used when no live rate has arrived yet (or the network is unavailable). The
+// UI marks CNY amounts with "≈" because both the rate and the catalog cost are
+// estimates.
+export const USD_CNY_FALLBACK = 7.2
+
+export function currencyFor(lang: string, mode: CurrencyMode = "auto"): Currency {
+  if (mode === "CNY" || mode === "USD") return mode
+  return String(lang).toLowerCase().startsWith("zh") ? "CNY" : "USD"
+}
+
+// session.stats costs are provider-catalog USD. Chinese users read CNY far more
+// easily, so the display layer converts with the latest USD/CNY rate.
+export function formatMoney(usd: number, currency: Currency = "USD", rate = USD_CNY_FALLBACK): string {
+  const n = Math.max(0, finite(usd))
+  if (currency === "USD") return formatCost(n)
+  const r = Number.isFinite(rate) && rate > 0 ? rate : USD_CNY_FALLBACK
+  const cny = n * r
+  if (cny === 0) return "≈¥0"
+  if (cny < 0.01) return `≈¥${cny.toFixed(4)}`
+  if (cny < 1) return `≈¥${cny.toFixed(3)}`
+  if (cny < 100) return `≈¥${cny.toFixed(2)}`
+  return `≈¥${Math.round(cny)}`
+}
+
 export function formatPercent(value: number | undefined): string {
   if (value === undefined || !Number.isFinite(value)) return "—"
   return `${Math.round(value)}%`

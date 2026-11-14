@@ -4,11 +4,13 @@ import { appendFileSync } from "node:fs"
 import {
   ageText,
   contextUsage,
+  currencyFor,
   dailyStats,
   fetchQuota,
-  formatCost,
+  formatMoney,
   formatPercent,
   formatTokens,
+  USD_CNY_FALLBACK,
   gitStats,
   localTimezone,
   mergeQuota,
@@ -66,6 +68,18 @@ const QUOTA_TTL_MS = 5 * 60_000
 // Working-tree status is cheap on normal repos but can be slow on huge ones.
 const GIT_POLL_MS = 30_000
 
+// Multiple completions inside this window are merged into one notification:
+// the host shows attention popups one at a time, so a burst otherwise queues
+// for minutes.
+const NOTIFY_WINDOW_MS = 2_000
+
+// Live USD/CNY rate: refresh twice a day, fall back to the cached value, then
+// to a conservative constant. The endpoint carries the rate date and needs no
+// key; jsDelivr is reachable from the environments this plugin runs in.
+const FX_URL = "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json"
+const FX_TTL_MS = 6 * 60 * 60_000
+const FX_TIMEOUT_MS = 5_000
+
 const short = (id: string) => id.slice(-6)
 
 // ---------------------------------------------------------------------------
@@ -103,6 +117,10 @@ type Pack = {
   readonly agent: string
   readonly rootBusy: string
   readonly notifyDone: (label: string) => string
+  readonly notifyAgents: (count: number) => string
+  readonly notifyRoots: (count: number) => string
+  readonly notifyShells: (count: number) => string
+  readonly notifyJoin: string
   readonly shell: {
     readonly label: Record<ShellKey, string>
     readonly other: string
@@ -143,6 +161,10 @@ const PACKS: Record<Lang, Pack> = {
     agent: "子代理",
     rootBusy: "主会话进行中",
     notifyDone: (label) => `✅ ${label} 完成了`,
+    notifyAgents: (n) => `✅ ${n} 个子代理完成了`,
+    notifyRoots: (n) => `✅ ${n} 个主会话完成了`,
+    notifyShells: (n) => `✅ ${n} 个后台命令完成了`,
+    notifyJoin: "；",
     shell: {
       label: {
         test: "运行测试",
@@ -192,6 +214,10 @@ const PACKS: Record<Lang, Pack> = {
     agent: "subagent",
     rootBusy: "main session busy",
     notifyDone: (label) => `✅ ${label} finished`,
+    notifyAgents: (n) => `✅ ${n} subagents finished`,
+    notifyRoots: (n) => `✅ ${n} sessions finished`,
+    notifyShells: (n) => `✅ ${n} background commands finished`,
+    notifyJoin: "; ",
     shell: {
       label: {
         test: "Run tests",
@@ -558,7 +584,88 @@ function getStore(context: Plugin.Context): TaskStore {
 
 function createTaskStore(context: Plugin.Context) {
   const data = context.data
-  probe("store create")
+  // Hot reload loads this module again and builds a second store; the host does
+  // not dispose the old root, so old pollers keep running. Only the newest
+  // instance may settle jobs or notify, otherwise every deploy multiplies the
+  // notification bursts until the TUI is restarted.
+  const instance = ((globalThis as any).__ocTaskbarInstance =
+    ((globalThis as any).__ocTaskbarInstance ?? 0) + 1)
+  const active = () => ((globalThis as any).__ocTaskbarInstance ?? 0) === instance
+  probe(`store create #${instance}`)
+
+  // Completion toggles are read before the job poller starts, so queueing never
+  // touches a later-declared binding.
+  let notifyEnabled: () => boolean = () => true
+  try {
+    const [enabled] = context.storage.store("notify", { initial: true })
+    if (typeof enabled === "function") notifyEnabled = () => Boolean(enabled())
+  } catch {
+    /* keep default */
+  }
+  // Root sessions complete on every Q&A round, so the 💬 channel gets its own
+  // toggle (default on) — silencing it without losing shell/agent/terminal pings.
+  let notifyRootEnabled: () => boolean = () => true
+  try {
+    const [rootEnabled] = context.storage.store("notifyRoot", { initial: true })
+    if (typeof rootEnabled === "function") notifyRootEnabled = () => Boolean(rootEnabled())
+  } catch {
+    /* keep default */
+  }
+
+  // ---- currency: live USD/CNY, cached across restarts ----
+  type FxState = { rate: number; at: number; source: string }
+  const FX_INITIAL: FxState = { rate: USD_CNY_FALLBACK, at: 0, source: "default" }
+  let fxStore: FxState | undefined
+  let setFxStore: ((mutation: (draft: FxState) => void) => Promise<void>) | undefined
+  const [fallbackFx, setFallbackFx] = createSignal<FxState>(FX_INITIAL)
+  try {
+    const [stored, setter] = context.storage.store<FxState>("fx", { initial: FX_INITIAL })
+    fxStore = stored as FxState
+    setFxStore = setter
+  } catch {
+    /* in-memory fallback */
+  }
+  const fxState = (): FxState => fxStore ?? fallbackFx()
+  const fxRate = (): number => {
+    const env = Number(process.env.OC_TASKBAR_USD_CNY)
+    if (Number.isFinite(env) && env > 0) return env
+    const rate = Number(fxState().rate)
+    return Number.isFinite(rate) && rate > 0 ? rate : USD_CNY_FALLBACK
+  }
+  let fxFetching = false
+  async function refreshFx(force = false) {
+    if (!active()) return
+    const env = Number(process.env.OC_TASKBAR_USD_CNY)
+    if (Number.isFinite(env) && env > 0) return
+    if (!force && Date.now() - (Number(fxState().at) || 0) < FX_TTL_MS) return
+    if (fxFetching) return
+    fxFetching = true
+    try {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), FX_TIMEOUT_MS)
+      const response = await fetch(FX_URL, { signal: controller.signal })
+      clearTimeout(timer)
+      if (!response.ok) throw new Error(`http ${response.status}`)
+      const json: any = await response.json()
+      const rate = Number(json?.usd?.cny)
+      if (!(rate > 0 && rate < 100)) throw new Error("bad rate")
+      const at = Date.now()
+      if (setFxStore) {
+        void setFxStore((draft) => {
+          draft.rate = rate
+          draft.at = at
+          draft.source = "live"
+        })
+      } else {
+        setFallbackFx({ rate, at, source: "live" })
+      }
+      probe(`fx live ${rate.toFixed(4)}`)
+    } catch (error) {
+      probe(`fx fail ${String(error)}`)
+    } finally {
+      fxFetching = false
+    }
+  }
 
   // Initial hydration lives in the shell channel and the session fallback
   // below — both run synchronously at store creation, never in onMount
@@ -595,6 +702,20 @@ function createTaskStore(context: Plugin.Context) {
     return lastLang
   })
   const pack = createMemo(() => PACKS[lang()])
+  // Chinese readers get CNY by default; English keeps USD. Costs stay USD in
+  // the stats payload and are converted only for display.
+  const currency = () => currencyFor(lang(), "auto")
+  const money = (usd: number) => formatMoney(usd, currency(), fxRate())
+  const moneyBoth = (usd: number) => {
+    const usdText = formatMoney(usd, "USD", fxRate())
+    return currency() === "CNY" ? `${formatMoney(usd, "CNY", fxRate())} (${usdText})` : usdText
+  }
+  const fxNote = () => {
+    const env = Number(process.env.OC_TASKBAR_USD_CNY)
+    if (Number.isFinite(env) && env > 0) return "env"
+    const at = Number(fxState().at) || 0
+    return at ? `${ageText(at)} ago` : "default"
+  }
 
   // ---- sub-agent families are lazy too: sync each family root once.
   // A failed sync un-marks the root so a later tab switch retries it. ----
@@ -1189,6 +1310,60 @@ function createTaskStore(context: Plugin.Context) {
       .map((job) => jobTaskItem(job)),
   )
 
+  // ---- coalesced completion notifications ----
+  // The host shows attention popups one at a time; several subagents finishing
+  // together would otherwise queue for minutes. Merge a short window into one
+  // popup, and only pop it while the TUI is blurred: a focused user already has
+  // the trail and the footer badge.
+  const pendingNotify = new Map<string, TaskItem>()
+  let notifyTimer: ReturnType<typeof setTimeout> | undefined
+  function flushNotify() {
+    notifyTimer = undefined
+    const items = [...pendingNotify.values()]
+    pendingNotify.clear()
+    if (items.length === 0 || !active()) return
+    const p = pack()
+    const agents = items.filter((item) => item.kind === "agent")
+    const roots = items.filter((item) => item.kind === "root")
+    const shells = items.filter((item) => item.kind === "shell" || item.kind === "terminal")
+    const parts: string[] = []
+    if (agents.length) {
+      parts.push(agents.length === 1 ? p.notifyDone(agents[0].label) : p.notifyAgents(agents.length))
+    }
+    if (roots.length) {
+      parts.push(roots.length === 1 ? p.notifyDone(roots[0].label) : p.notifyRoots(roots.length))
+    }
+    if (shells.length) {
+      parts.push(shells.length === 1 ? p.notifyDone(shells[0].label) : p.notifyShells(shells.length))
+    }
+    if (parts.length === 0) return
+    try {
+      const result = context.attention.notify({
+        message: parts.join(p.notifyJoin),
+        // The built-in notifications plugin already plays subagent/root
+        // completion sounds; shell and terminal completions are only covered
+        // here, so keep at most one sound per wave.
+        notification: { when: "blurred" },
+        sound: shells.length ? { name: "done" } : false,
+      })
+      void Promise.resolve(result)
+        .then((value: any) =>
+          probe(`notify send n=${items.length} ok=${value?.ok} skipped=${value?.skipped ?? "-"}`),
+        )
+        .catch((error) => probe(`notify send fail: ${String(error)}`))
+    } catch (error) {
+      probe(`notify send fail: ${String(error)}`)
+    }
+  }
+  function queueNotify(item: TaskItem) {
+    if (!active() || !notifyEnabled()) return
+    if (item.kind === "root" && !notifyRootEnabled()) return
+    pendingNotify.set(item.id, item)
+    if (notifyTimer) return
+    notifyTimer = setTimeout(flushNotify, NOTIFY_WINDOW_MS)
+    ;(notifyTimer as any).unref?.()
+  }
+
   const notifiedJobs = new Set<string>()
   function notifyJob(job: JobInfo) {
     const key = jobGenKey(job)
@@ -1197,21 +1372,7 @@ function createTaskStore(context: Plugin.Context) {
     if (notifiedJobs.size > 500) {
       for (const old of [...notifiedJobs].slice(0, 200)) notifiedJobs.delete(old)
     }
-    if (!notifyEnabled()) return
-    const p = pack()
-    const label = jobLabel(job, `${p.agent} ${short(job.childSessionID ?? job.id)}`)
-    try {
-      const result = context.attention.notify({
-        message: p.notifyDone(label),
-        notification: { when: "always" },
-        sound: { name: "subagent_done" },
-      })
-      void Promise.resolve(result)
-        .then((value: any) => probe(`notify job ${key} ok=${value?.ok} skipped=${value?.skipped ?? "-"}`))
-        .catch((error) => probe(`notify job fail ${key}: ${String(error)}`))
-    } catch (error) {
-      probe(`notify job fail ${key}: ${String(error)}`)
-    }
+    queueNotify(jobTaskItem(job))
   }
 
   // Both completion paths (a completed row seen, a running row vanished) settle a
@@ -1220,6 +1381,7 @@ function createTaskStore(context: Plugin.Context) {
   // normal signal; a completed row only survives when delivery is stuck.
   const settledGens = new Set<string>()
   function settleJob(job: JobInfo) {
+    if (!active()) return
     const gen = jobGenKey(job)
     if (settledGens.has(gen)) return
     settledGens.add(gen)
@@ -1237,6 +1399,7 @@ function createTaskStore(context: Plugin.Context) {
   let jobsPrimed = false
   let lastJobs: JobInfo[] = []
   async function syncJobs() {
+    if (!active()) return
     const req = ++jobReq
     try {
       const raw = await (context.client as any).experimental.job.list({ kind: "subagent" })
@@ -1399,7 +1562,7 @@ function createTaskStore(context: Plugin.Context) {
 
   async function showQuota() {
     const p = pack()
-    await Promise.allSettled([refreshQuota(true), refreshMonthStats(true), refreshStats(true)])
+    await Promise.allSettled([refreshQuota(true), refreshMonthStats(true), refreshStats(true), refreshFx()])
     const lines: string[] = []
     const q = quota()
     if (q.deepseek) lines.push(`${q.deepseek.short}\n  ${q.deepseek.detail}`)
@@ -1410,16 +1573,17 @@ function createTaskStore(context: Plugin.Context) {
     const today = todayStats()
     if (today) {
       lines.push(
-        `\n${p.status.today}: ${formatCost(today.cost)} · ${formatTokens(today.tokens)} tok · ${today.prompts} prompts`,
+        `\n${p.status.today}: ${moneyBoth(today.cost)} · ${formatTokens(today.tokens)} tok · ${today.prompts} prompts`,
       )
       const dsCost = providerCost(today, /deepseek/i)
       const glmCost = providerCost(today, /zhipu|zai|bigmodel/i)
-      if (dsCost || glmCost) lines.push(`  DeepSeek ${formatCost(dsCost)} · GLM ${formatCost(glmCost)}`)
+      if (dsCost || glmCost) lines.push(`  DeepSeek ${money(dsCost)} · GLM ${money(glmCost)}`)
     }
     const month = monthStats()
     if (month) {
-      lines.push(`${p.status.quota} ${new Date().getMonth() + 1}月: ${formatCost(month.cost)} · ${formatTokens(month.tokens)} tok`)
+      lines.push(`${p.status.quota} ${new Date().getMonth() + 1}月: ${moneyBoth(month.cost)} · ${formatTokens(month.tokens)} tok`)
     }
+    if (currency() === "CNY") lines.push(`≈ 1 USD = ${fxRate().toFixed(2)} CNY · ${fxNote()}`)
     const ctx = contextInfo()
     if (ctx) {
       lines.push(
@@ -1427,7 +1591,7 @@ function createTaskStore(context: Plugin.Context) {
       )
     }
     const usage = sessionUsage()
-    if (usage) lines.push(`${p.status.session}: ${formatCost(usage.cost)} · ${formatTokens(usage.tokens)} tok`)
+    if (usage) lines.push(`${p.status.session}: ${moneyBoth(usage.cost)} · ${formatTokens(usage.tokens)} tok`)
     const repository = git()
     if (repository) {
       lines.push(
@@ -1496,6 +1660,9 @@ function createTaskStore(context: Plugin.Context) {
   const [completed, setCompleted] = createSignal<CompletedItem[]>([])
   const labelCache = new Map<string, TaskItem>()
   const remember = (item: TaskItem, silent = false) => {
+    // Old hot-reload instances keep their timers; never let them mutate the
+    // trail or ledger of the current plugin generation.
+    if (!active()) return
     const at = Date.now()
     setCompleted((list) => [
       ...list.filter((entry) => entry.id !== item.id),
@@ -1605,47 +1772,25 @@ function createTaskStore(context: Plugin.Context) {
     }),
   )
 
-  // ---- completion notifications (on by default, persisted toggle) ----
-  // Defensive: storage shape is host-controlled; never let it break rendering.
-  let notifyEnabled: () => boolean = () => true
-  try {
-    const [enabled] = context.storage.store("notify", { initial: true })
-    if (typeof enabled === "function") notifyEnabled = () => Boolean(enabled())
-  } catch {
-    /* keep default */
-  }
-  // Root sessions complete on every Q&A round, so the 💬 channel gets its own
-  // toggle (default on) — silencing it without losing shell/agent/terminal pings.
-  let notifyRootEnabled: () => boolean = () => true
-  try {
-    const [rootEnabled] = context.storage.store("notifyRoot", { initial: true })
-    if (typeof rootEnabled === "function") notifyRootEnabled = () => Boolean(rootEnabled())
-  } catch {
-    /* keep default */
-  }
+  // ---- completion notifications (on by default, persisted toggles) ----
+  // Fresh trail entries flow through the coalescer: one popup per short wave,
+  // only while blurred, and no duplicate subagent sound (the built-in
+  // notifications plugin already plays it).
   const notified = new Set<string>()
   createEffect(
     on(completed, (list, previous) => {
-      if (!notifyEnabled()) return
+      if (!active() || !notifyEnabled()) return
       const fresh = previous === undefined ? [] : list.filter((entry) => !previous.some((old) => entry.id === old.id))
       for (const entry of fresh) {
         if (entry.silent) continue
+        if (entry.kind === "root" && !notifyRootEnabled()) continue
         const key = `${entry.id}:${entry.at}`
         if (notified.has(key)) continue
-        if (entry.kind === "root" && !notifyRootEnabled()) continue
         notified.add(key)
         if (notified.size > 200) {
           for (const oldest of [...notified].slice(0, 100)) notified.delete(oldest)
         }
-        try {
-          context.attention.notify({
-            message: pack().notifyDone(entry.label),
-            sound: { name: entry.kind === "agent" ? "subagent_done" : "done" },
-          })
-          probe(`notify ok ${key}`)
-        } catch (error) {
-          probe(`notify fail ${key}: ${String(error)}`)
-        }
+        queueNotify(entry)
       }
     }),
   )
@@ -1659,14 +1804,17 @@ function createTaskStore(context: Plugin.Context) {
   void refreshStats()
   void refreshQuota()
   void refreshGit()
+  void refreshFx()
   const jobTimer = setInterval(() => void syncJobs(), JOB_POLL_MS)
   const statsTimer = setInterval(() => void refreshStats(), STATS_POLL_MS)
   const quotaTimer = setInterval(() => void refreshQuota(), QUOTA_TTL_MS)
   const gitTimer = setInterval(() => void refreshGit(), GIT_POLL_MS)
+  const fxTimer = setInterval(() => void refreshFx(), FX_TTL_MS)
   jobTimer.unref?.()
   statsTimer.unref?.()
   quotaTimer.unref?.()
   gitTimer.unref?.()
+  fxTimer.unref?.()
 
   const running = createMemo<TaskItem[]>(() => {
     const p = pack()
@@ -1717,6 +1865,8 @@ function createTaskStore(context: Plugin.Context) {
     showSettings,
     showQuota,
     refreshAll,
+    money,
+    moneyBoth,
     status: {
       pref,
       contextInfo,
@@ -1772,12 +1922,12 @@ function StatusCard(props: { context: Plugin.Context; tasks: ReturnType<typeof g
     const usage = s.sessionUsage()
     if (!usage) return "—"
     const agents = usage.subagents > 0 ? ` · ${usage.subagents}🤖` : ""
-    return `${formatCost(usage.cost)} · ${formatTokens(usage.tokens)} tok${agents}`
+    return `${s.money(usage.cost)} · ${formatTokens(usage.tokens)} tok${agents}`
   }
   const todayText = () => {
     const today = s.todayStats()
     if (!today) return "—"
-    return `${formatCost(today.cost)} · ${formatTokens(today.tokens)} tok`
+    return `${s.money(today.cost)} · ${formatTokens(today.tokens)} tok`
   }
   const showQuota = () => {
     const q = s.quota()
