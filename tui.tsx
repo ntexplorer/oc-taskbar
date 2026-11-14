@@ -39,7 +39,7 @@ const probe = (msg: string) => {
 }
 
 // How long completed tasks stay visible before fading out.
-const RETAIN_MS = 60_000
+const RETAIN_MS = 30_000
 
 // While no sidebar has ever mounted (narrow terminal), re-hydrate agent
 // families on this cadence so the footer fallback still sees fresh subagents.
@@ -1747,7 +1747,7 @@ function createTaskStore(context: Plugin.Context) {
 
   // Track root sessions transitioning running -> idle. The tab being watched
   // skips the trail entirely: every question/answer would otherwise ring a
-  // notification and paint a 60s ghost of a conversation the user just saw
+  // notification and paint a 30s ghost of a conversation the user just saw
   // answer. Other tabs get the full completion treatment.
   createEffect(
     on(roots, (list, previous) => {
@@ -1890,7 +1890,7 @@ function createTaskStore(context: Plugin.Context) {
 function TaskRow(props: { item: TaskItem; theme: Plugin.Context["theme"]; pack: Pack; done?: boolean }) {
   const [expanded, setExpanded] = createSignal(false)
   // done and dim share the muted color: dim marks the busy root session of the
-  // tab being watched (v1.2), done marks the 60s completion trail.
+  // tab being watched (v1.2), done marks the 30s completion trail.
   const fg = props.done || props.item.dim ? props.theme.text.muted : props.theme.text.base
   // Truncate by code points: slicing UTF-16 units can cut a surrogate pair
   // (agent titles may contain emoji) in half and render tofu.

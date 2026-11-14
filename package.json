@@ -1,8 +1,25 @@
 {
   "name": "oc-taskbar",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "description": "Persistent task monitor and usage statusline for the OpenCode V2 TUI",
   "type": "module",
   "private": true,
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ntexplorer/oc-taskbar.git"
+  },
+  "homepage": "https://github.com/ntexplorer/oc-taskbar#readme",
+  "bugs": {
+    "url": "https://github.com/ntexplorer/oc-taskbar/issues"
+  },
+  "keywords": [
+    "opencode",
+    "tui",
+    "plugin",
+    "statusline",
+    "task-monitor",
+    "solidjs",
+    "terminal"
+  ]
 }
