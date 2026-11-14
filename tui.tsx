@@ -1050,16 +1050,16 @@ function createTaskStore(context: Plugin.Context) {
   }
   const prefs = (): StatusPrefs => (prefsStore ?? fallbackPrefs()) as StatusPrefs
   const pref = (key: keyof StatusPrefs): boolean => Boolean(prefs()[key] ?? STATUS_DEFAULTS[key])
-  const togglePref = (key: keyof StatusPrefs) => {
-    const next = !pref(key)
+  const setPref = async (key: keyof StatusPrefs, value: boolean): Promise<boolean> => {
     try {
-      if (setPrefsStore) void setPrefsStore((draft) => { draft[key] = next })
-      else setFallbackPrefs((previous) => ({ ...previous, [key]: next }))
+      if (setPrefsStore) await setPrefsStore((draft) => { draft[key] = value })
+      else setFallbackPrefs((previous) => ({ ...previous, [key]: value }))
     } catch {
-      /* preference persistence is best effort */
+      return false
     }
-    probe(`pref ${key}=${next}`)
-    if (next && (key === "quota" || key === "footer")) void refreshQuota(true)
+    probe(`pref ${key}=${value}`)
+    if (value && (key === "quota" || key === "footer")) void refreshQuota(true)
+    return true
   }
 
   // Completed background jobs are a durable "unread inbox": the server keeps
@@ -1180,10 +1180,13 @@ function createTaskStore(context: Plugin.Context) {
         ? [id]
         : [...new Set([id, ...data.session.family(id)])]
       let tokens = 0
+      let subagents = 0
       for (const sessionID of ids) {
         const session = data.session.get(sessionID)
         if (!session) continue
         tokens += tokensTotal((session as any).tokens)
+        // The badge is live: only children currently running. Tokens/cost stay cumulative.
+        if (sessionID !== id && data.session.status(sessionID) === "running") subagents++
       }
       let cost = 0
       try {
@@ -1191,7 +1194,7 @@ function createTaskStore(context: Plugin.Context) {
       } catch {
         /* keep zero */
       }
-      return { tokens, cost, subagents: info.parentID ? 0 : Math.max(0, ids.length - 1) }
+      return { tokens, cost, subagents }
     } catch {
       return undefined
     }
@@ -1527,13 +1530,16 @@ function createTaskStore(context: Plugin.Context) {
       ["git", p.status.git, "Branch + working tree stats"],
       ["footer", "Footer", "Compact footer fallback"],
     ]
+    // The dialog's options are a snapshot. Keep a local draft so the check marks
+    // stay in sync with the user's selection while persistence settles.
+    const draft: StatusPrefs = { ...prefs() }
     for (;;) {
       try {
         const selected = await context.ui.dialog.select<keyof StatusPrefs | "refresh">({
           title: p.status.settingsTitle,
           options: [
             ...labels.map(([key, label, description]) => ({
-              title: `${pref(key) ? "✅" : "⬜"} ${label}`,
+              title: `${draft[key] ? "✅" : "⬜"} ${label}`,
               value: key,
               description,
             })),
@@ -1553,7 +1559,9 @@ function createTaskStore(context: Plugin.Context) {
           refreshAll()
           continue
         }
-        togglePref(selected)
+        const next = !draft[selected]
+        draft[selected] = next
+        if (!(await setPref(selected, next))) draft[selected] = !next
       } catch {
         return
       }

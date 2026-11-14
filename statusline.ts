@@ -306,7 +306,7 @@ const deepseekLine = (json: any, now: number): QuotaLine => {
     .join(" / ")
   return {
     label: "DeepSeek",
-    short: `💠 ${symbol}${total.toFixed(2)}`,
+    short: `💠 DS ${symbol}${total.toFixed(2)}`,
     detail: `余额 ${symbol}${total.toFixed(2)} · 可用 ${json?.is_available === false ? "否" : "是"} · 充值 ${symbol}${finite(info.topped_up_balance).toFixed(2)} / 赠送 ${symbol}${finite(info.granted_balance).toFixed(2)}${infos.length > 1 ? ` · ${all}` : ""}`,
     low,
     at: now,
