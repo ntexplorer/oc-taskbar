@@ -1905,6 +1905,10 @@ function StatusCard(props: { context: Plugin.Context; tasks: ReturnType<typeof g
   const p = () => props.tasks.pack()
   const theme = props.context.theme
   const s = props.tasks.status
+  // `status` is a nested object; money lives on the store itself. Keep a local
+  // alias (and a USD fallback for a store from an older hot-reload generation).
+  const money = (usd: number) =>
+    typeof props.tasks.money === "function" ? props.tasks.money(usd) : formatMoney(usd, "USD")
   const warning = theme.text.feedback?.warning?.base ?? theme.text.base
   const danger = theme.text.feedback?.error?.base ?? theme.text.base
   const percentColor = (percent: number | undefined) => {
@@ -1922,12 +1926,12 @@ function StatusCard(props: { context: Plugin.Context; tasks: ReturnType<typeof g
     const usage = s.sessionUsage()
     if (!usage) return "—"
     const agents = usage.subagents > 0 ? ` · ${usage.subagents}🤖` : ""
-    return `${s.money(usage.cost)} · ${formatTokens(usage.tokens)} tok${agents}`
+    return `${money(usage.cost)} · ${formatTokens(usage.tokens)} tok${agents}`
   }
   const todayText = () => {
     const today = s.todayStats()
     if (!today) return "—"
-    return `${s.money(today.cost)} · ${formatTokens(today.tokens)} tok`
+    return `${money(today.cost)} · ${formatTokens(today.tokens)} tok`
   }
   const showQuota = () => {
     const q = s.quota()

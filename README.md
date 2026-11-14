@@ -24,7 +24,8 @@ V1 时代底部 spinner 转 = 有任务在跑，停 = 全部结束，看一眼�
 - [x] v1.5.0（2026-11-14）：适配 opencode 2.3.0 的「子代理默认后台」——上游在子代理空闲时立即投递报告并删除持久 job 行，插件改用「运行代际消失」检测正常完成（✅ 残影 + 一次通知），`🎫 未确认` 收窄为「报告投递卡住」的持久收件箱；内置 Context 卡关闭项迁移到 TUI 配置 `cli.json`
 - [x] v1.5.1（2026-11-14）：命令 keymap 层改为 `mode: "global"`——2.3.0 的斜杠自动补全打开时会压入 `autocomplete` 模式，非 global 层被过滤，导致 `/quota`、`/statusline`、`/completed` 显示「No matching commands」
 - [x] v1.6.0（2026-11-14）：通知降噪——聚焦时只留残影/徽标，失焦才弹，2 秒内合并为一条；子代理完成不再重复发声（内置通知已覆盖），shell/terminal 每波一声；新增热重载活跃实例守卫。金额显示改为中文默认人民币（`≈¥`，实时 USD/CNY 汇率，6 小时刷新，失败回退缓存/7.2，`OC_TASKBAR_USD_CNY` 可覆盖），`/quota` 同时保留 USD 原值
-- [ ] v1.6.0 验收：见 AGENTS.md「接续指引」的验收清单（2.3.0 子代理完成、🎫 卡住报告、斜杠命令、通知降噪、人民币显示、跨 location shell、断连重连、切 tab）
+- [x] v1.6.1（2026-11-14）：修复侧栏 `s.money is not a function`——`money` 在 store 顶层，而 `StatusCard` 的 `s` 是 `props.tasks.status` 子对象；改为从 `props.tasks.money` 读取，并对旧热重载 store 回退 USD
+- [ ] v1.6.0/v1.6.1 验收：见 AGENTS.md「接续指引」的验收清单（2.3.0 子代理完成、🎫 卡住报告、斜杠命令、通知降噪、人民币显示、跨 location shell、断连重连、切 tab）
 
 ## 使用
 
