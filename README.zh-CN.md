@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/banner.zh-CN.svg" alt="oc-taskbar — OpenCode V2 TUI 的任务监视与用量状态栏" width="100%">
+  <img src="assets/banner.zh-CN.svg?v=2" alt="oc-taskbar — OpenCode V2 TUI 的任务监视与用量状态栏" width="100%">
 </div>
 
 <p align="center">

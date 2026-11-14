@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/banner.svg" alt="oc-taskbar — task monitor and usage statusline for the OpenCode V2 TUI" width="100%">
+  <img src="assets/banner.svg?v=2" alt="oc-taskbar — task monitor and usage statusline for the OpenCode V2 TUI" width="100%">
 </div>
 
 <p align="center">
