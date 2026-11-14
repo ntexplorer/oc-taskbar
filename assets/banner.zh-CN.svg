@@ -1,0 +1,89 @@
+<svg width="1280" height="360" viewBox="0 0 1280 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="oc-taskbar — OpenCode V2 TUI 的任务监视与用量状态栏">
+  <defs>
+    <linearGradient id="bg" x1="48" y1="12" x2="1220" y2="348" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1220"/>
+      <stop offset="0.55" stop-color="#0D1526"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="title" x1="188" y1="120" x2="430" y2="168" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7DD3FC"/>
+      <stop offset="1" stop-color="#C4B5FD"/>
+    </linearGradient>
+    <radialGradient id="glowCyan" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(210 42) rotate(48) scale(260 260)">
+      <stop stop-color="#22D3EE" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#22D3EE" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowViolet" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1130 336) rotate(-140) scale(300 300)">
+      <stop stop-color="#8B5CF6" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#8B5CF6" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#94A3B8" stroke-opacity="0.055"/>
+    </pattern>
+    <clipPath id="frame">
+      <rect width="1280" height="360" rx="28"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#frame)">
+    <rect width="1280" height="360" fill="url(#bg)"/>
+    <rect width="1280" height="360" fill="url(#grid)"/>
+    <circle cx="210" cy="42" r="260" fill="url(#glowCyan)"/>
+    <circle cx="1130" cy="336" r="300" fill="url(#glowViolet)"/>
+    <rect x="1" y="1" width="1278" height="358" rx="27" stroke="#94A3B8" stroke-opacity="0.18"/>
+  </g>
+
+  <!-- left: identity -->
+  <g font-family="'Segoe UI', 'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', sans-serif">
+    <rect x="64" y="54" width="240" height="36" rx="18" fill="#0F2233" stroke="#1E4D63"/>
+    <circle cx="86" cy="72" r="5" fill="#34D399"/>
+    <text x="102" y="77" fill="#A5F3FC" font-size="14" font-weight="600" letter-spacing="0.4">OpenCode V2 TUI 插件</text>
+
+    <text x="64" y="166" fill="#F8FAFC" font-size="68" font-weight="700" letter-spacing="-2.2">oc-<tspan fill="url(#title)">taskbar</tspan></text>
+    <text x="66" y="214" fill="#CBD5E1" font-size="27" font-weight="500" letter-spacing="-0.3">后台任务，一眼看清。</text>
+    <text x="66" y="248" fill="#94A3B8" font-size="18" font-weight="400">子代理 · 后台 shell · 终端 · 上下文 · 配额 · Git</text>
+
+    <g font-size="13" font-weight="600">
+      <rect x="64" y="280" width="238" height="34" rx="17" fill="#111C2E" stroke="#24344D"/>
+      <text x="80" y="302" fill="#BBF7D0">✅ 30 秒完成残影</text>
+
+      <rect x="314" y="280" width="210" height="34" rx="17" fill="#111C2E" stroke="#24344D"/>
+      <text x="330" y="302" fill="#FDE68A">⚡ 失焦才通知</text>
+
+      <rect x="536" y="280" width="126" height="34" rx="17" fill="#111C2E" stroke="#24344D"/>
+      <text x="552" y="302" fill="#C4B5FD">🌐 EN / 中文</text>
+    </g>
+  </g>
+
+  <!-- right: illustrative sidebar card -->
+  <g font-family="'Segoe UI', 'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', sans-serif">
+    <rect x="720" y="44" width="496" height="288" rx="22" fill="#0F1B2D" stroke="#22324A"/>
+    <rect x="720" y="44" width="496" height="288" rx="22" fill="url(#glowViolet)" fill-opacity="0.08"/>
+
+    <text x="748" y="84" fill="#E2E8F0" font-size="19" font-weight="650">📋 后台任务</text>
+    <circle cx="1140" cy="78" r="4" fill="#34D399"/>
+    <text x="1176" y="83" fill="#6EE7B7" font-size="13" font-weight="600" text-anchor="end">3 个运行中</text>
+
+    <g font-size="14">
+      <rect x="744" y="100" width="448" height="44" rx="12" fill="#111C2E" stroke="#1E3049"/>
+      <circle cx="766" cy="122" r="4" fill="#38BDF8"/>
+      <text x="782" y="127" fill="#E2E8F0" font-weight="600">🧪  运行测试</text>
+      <text x="1172" y="127" fill="#64748B" font-size="12" text-anchor="end">2 分钟</text>
+
+      <rect x="744" y="152" width="448" height="44" rx="12" fill="#111C2E" stroke="#1E3049"/>
+      <circle cx="766" cy="174" r="4" fill="#38BDF8"/>
+      <text x="782" y="179" fill="#E2E8F0" font-weight="600">🔍  探索代码</text>
+      <text x="1172" y="179" fill="#64748B" font-size="12" text-anchor="end">1 分钟</text>
+
+      <rect x="744" y="204" width="448" height="44" rx="12" fill="#0D1727" stroke="#1A2A40"/>
+      <circle cx="766" cy="226" r="4" fill="#34D399"/>
+      <text x="782" y="231" fill="#94A3B8" font-weight="600">✅  构建完成</text>
+      <text x="1172" y="231" fill="#475569" font-size="12" text-anchor="end">刚刚</text>
+    </g>
+
+    <rect x="744" y="264" width="448" height="48" rx="12" fill="#0B1524" stroke="#1E3049"/>
+    <text x="762" y="293" fill="#7DD3FC" font-size="12" font-weight="600">📊 上下文 42%</text>
+    <text x="886" y="293" fill="#94A3B8" font-size="12">· 今日 ≈¥0.29</text>
+    <text x="1172" y="293" fill="#C4B5FD" font-size="12" font-weight="600" text-anchor="end">💠 DS ¥237.37</text>
+  </g>
+</svg>
