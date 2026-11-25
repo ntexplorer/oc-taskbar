@@ -4,6 +4,9 @@
   "description": "Persistent task monitor and usage statusline for the OpenCode V2 TUI",
   "type": "module",
   "private": true,
+  "scripts": {
+    "test": "node --test"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",

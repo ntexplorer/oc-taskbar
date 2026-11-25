@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on 
 
 Historical note: the `v0.1`–`v1.1.2` milestones predate consistent `package.json` version bumps (for example, the `v1.0` tag contains `"version": "0.0.1"`). Tag names follow the milestone names used in the project notes; `package.json` has been aligned from `v1.2.0` onward.
 
+## [Unreleased]
+
+### Added
+- Unit tests for `statusline.ts` (`test/statusline.test.mjs`, built on `node:test`, no dependencies) and an `npm test` script.
+
+### Documentation
+- Verified against opencode 2.4.1: a source comparison with 2.3.0 found no breaking changes for the plugin, and the baseline (bundle check, unit tests, headless probe) passes. Plugin code is unchanged.
+
 ## [1.6.3] - 2026-11-14
 
 ### Changed
