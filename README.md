@@ -148,7 +148,7 @@ Credential lookup prefers the active OpenCode credential-store entry, then envir
 
 ## Compatibility and limitations
 
-- Tested against **opencode 2.3.0** on Windows. opencode iterates quickly; behavior may change in later versions.
+- Tested against **opencode 2.3.0 and 2.4.1** on Windows. opencode iterates quickly; behavior may change in later versions.
 - A user-cancelled background job looks like a normal completion (the generation disappears).
 - A subagent that leaves its own background shell running may be reported as idle before that shell finishes; the trail can appear early.
 - The plugin cannot disable other built-in plugins through a public API; disabling the built-in Context card is a deployment step (see above).
@@ -163,6 +163,8 @@ Project notes, verified upstream facts and acceptance checklists live in [AGENTS
 npx esbuild tui.tsx --bundle --packages=external --format=esm \
   --jsx=automatic --jsx-import-source=@opentui/solid --outfile=/tmp/oc-taskbar.mjs
 ```
+
+`npm test` runs the `statusline.ts` unit tests (`test/statusline.test.mjs`, built on `node:test`, no dependencies). It needs Node 22.18+ so the `.ts` module loads through type stripping.
 
 For a real TUI check, copy the directory into `<config>/plugins/oc-taskbar`, restart the TUI, then run a background shell or subagent. Set `OC_TASKBAR_PROBE` to see `store create #N`, `jobs N running=M`, `stats today`, `quota …` and `resync all (server.connected)` lines.
 

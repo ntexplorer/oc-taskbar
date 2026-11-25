@@ -148,7 +148,7 @@ rsync -a --delete --exclude .git ./oc-taskbar/ ~/.config/opencode/plugins/oc-tas
 
 ## 兼容性与已知限制
 
-- 已在 **Windows + opencode 2.3.0** 实测。opencode 迭代快，后续版本行为可能变化。
+- 已在 **Windows + opencode 2.3.0 / 2.4.1** 实测。opencode 迭代快，后续版本行为可能变化。
 - 用户主动 cancel 的后台 job 也会表现为「代际消失」，因此会显示为完成。
 - 子代理如果留下自己的后台 shell，可能在 shell 结束前就被判定 idle，残影会提前出现。
 - 插件不能用公开 API 关闭其他内置插件；关闭内置 Context 卡是部署配置项（见上）。
@@ -163,6 +163,8 @@ rsync -a --delete --exclude .git ./oc-taskbar/ ~/.config/opencode/plugins/oc-tas
 npx esbuild tui.tsx --bundle --packages=external --format=esm \
   --jsx=automatic --jsx-import-source=@opentui/solid --outfile=/tmp/oc-taskbar.mjs
 ```
+
+`npm test` 运行 `statusline.ts` 的单元测试（`test/statusline.test.mjs`，基于 `node:test`，零依赖）。需要 Node 22.18+，以便通过类型剥离直接加载 `.ts` 模块。
 
 真实 TUI 验证：把目录复制到 `<config>/plugins/oc-taskbar`，重启 TUI，然后跑一个后台 shell 或子代理。设置 `OC_TASKBAR_PROBE` 可以看到 `store create #N`、`jobs N running=M`、`stats today`、`quota …`、`resync all (server.connected)` 等诊断行。
 
