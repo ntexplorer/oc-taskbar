@@ -2,6 +2,8 @@
 
 来源：`anomalyco/opencode`（原 sst/opencode）`dev` 分支，v2.1.x。本文档是实现 `tui.tsx` 的依据，防止上游重构后迷失。
 
+> **v1.6.3 补充（2026-11-25，opencode 2.4.1 核对）**：插件依赖的 API 在 2.3.0 → 2.4.1 之间**无破坏性变更**，下方各节继续成立；增量部分（细节见 AGENTS.md 事实 20）——①子代理完成检测自 v1.5.0 起走 `client.experimental.job.list({kind:"subagent"})` 轮询（2.3.0 起报告投递后 job 行毫秒级删除，AGENTS.md 事实 17）；②2.4.1 新增事件 `experimental.job.updated`（载荷 `{info: Job.Info}`，listed 后台 job 启动 / 转后台 / 结束时发布，终态 `Job.Status` 含 `cancelled`）与 `data.job.list(sessionID)`（"Running background jobs owned by the session or any session below it"，Experimental）——**尚未接入**，接入后可替代 10s 轮询并区分「取消」与「完成」；③`Job.Kind` 增 `video`/`codemode`，服务端 experimental 组新增 `job.cancel` 处理器。
+
 > **v1.3.0 补充（2026-11-06）**：下方「数据层懒加载」坑 2 的 `data.shell.*` 路线已**废弃**——宿主按 location（`[directory, workspaceID]`）给 shell 分桶，无参 `data.shell.list()/sync()` 只覆盖 TUI 启动目录桶（AGENTS.md 事实 16）；现插件直订原始 `shell.*` 事件 + 按桶 `client.shell.list({location})` 直连对账，不再依赖 `data.shell.*`。
 
 > **v1.0 补充（实测教训，详见 AGENTS.md 事实 10/12/13）**：
