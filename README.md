@@ -148,7 +148,7 @@ Credential lookup prefers the active OpenCode credential-store entry, then envir
 
 ## Compatibility and limitations
 
-- Tested against **opencode 2.3.0 and 2.4.1** on Windows. opencode iterates quickly; behavior may change in later versions.
+- Tested in daily use on **Windows + opencode 2.3.0**. **2.4.1** has been checked against the 2.3.0 source (no breaking changes for the plugin) and loads cleanly in a headless probe, but has not had a full real-TUI regression yet. opencode iterates quickly; behavior may change in later versions.
 - A user-cancelled background job looks like a normal completion (the generation disappears).
 - A subagent that leaves its own background shell running may be reported as idle before that shell finishes; the trail can appear early.
 - The plugin cannot disable other built-in plugins through a public API; disabling the built-in Context card is a deployment step (see above).

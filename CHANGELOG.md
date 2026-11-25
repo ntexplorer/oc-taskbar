@@ -119,6 +119,7 @@ Historical note: the `v0.1`–`v1.1.2` milestones predate consistent `package.js
 - Initial prototype: claim `sidebar.content` and render a task badge.
 - API notes covering the TUI plugin slot system, built-in feature plugins and data sources.
 
+[unreleased]: https://github.com/ntexplorer/oc-taskbar/compare/v1.6.3...HEAD
 [1.6.3]: https://github.com/ntexplorer/oc-taskbar/releases/tag/v1.6.3
 [1.6.2]: https://github.com/ntexplorer/oc-taskbar/releases/tag/v1.6.2
 [1.6.1]: https://github.com/ntexplorer/oc-taskbar/releases/tag/v1.6.1
