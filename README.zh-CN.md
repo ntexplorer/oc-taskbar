@@ -148,7 +148,7 @@ rsync -a --delete --exclude .git ./oc-taskbar/ ~/.config/opencode/plugins/oc-tas
 
 ## 兼容性与已知限制
 
-- 已在 **Windows + opencode 2.3.0** 上日常使用实测。**2.4.1** 已做源码核对（对本插件无破坏性变更）并无头装载验证通过，但尚未做完整的真实 TUI 回归。opencode 迭代快，后续版本行为可能变化。
+- 已在 **Windows + opencode 2.3.0** 上日常使用实测。**2.4.1** 已做源码核对（对本插件无破坏性变更），并在真实 TUI 上通过一轮短测（侧栏行、底部同行、切 tab、任务结束），尚无多日使用记录。opencode 迭代快，后续版本行为可能变化。
 - 用户主动 cancel 的后台 job 也会表现为「代际消失」，因此会显示为完成。
 - 子代理如果留下自己的后台 shell，可能在 shell 结束前就被判定 idle，残影会提前出现。
 - 插件不能用公开 API 关闭其他内置插件；关闭内置 Context 卡是部署配置项（见上）。

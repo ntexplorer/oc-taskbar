@@ -10,7 +10,7 @@ Historical note: the `v0.1`–`v1.1.2` milestones predate consistent `package.js
 - Unit tests for `statusline.ts` (`test/statusline.test.mjs`, built on `node:test`, no dependencies) and an `npm test` script.
 
 ### Documentation
-- Verified against opencode 2.4.1: a source comparison with 2.3.0 found no breaking changes for the plugin, and the baseline (bundle check, unit tests, headless probe) passes. Plugin code is unchanged.
+- Verified against opencode 2.4.1: a source comparison with 2.3.0 found no breaking changes for the plugin, and the baseline (bundle check, unit tests, headless probe) passes. A short real-TUI check on 2.4.1 (sidebar, footer line, tab switching, task completion) passed as well. Plugin code is unchanged.
 
 ## [1.6.3] - 2026-11-14
 
